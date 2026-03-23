@@ -1,28 +1,20 @@
 {
-  "name": "worker-html-scraper",
-  "version": "1.1.0",
-  "description": "Fast HTML web scraper without browser overhead for CafeScraper",
+  "name": "worker-cheerio-scraper",
+  "version": "2.0.0",
+  "description": "Fast web scraper using Cheerio for HTML parsing with CDP browser support",
   "main": "main.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node main.js",
     "test": "node test.js"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.13.4",
     "cheerio": "^1.0.0",
+    "puppeteer": "^23.0.0",
+    "@grpc/grpc-js": "^1.13.4",
     "google-protobuf": "^4.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "keywords": [
-    "scraper",
-    "crawler",
-    "html",
-    "cheerio",
-    "fast",
-    "lightweight"
-  ],
-  "author": "Kael Odin",
-  "license": "Apache-2.0"
+  }
 }

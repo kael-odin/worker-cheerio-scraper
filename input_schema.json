@@ -1,10 +1,10 @@
 {
-  "description": "Fast HTML web scraper without browser overhead. Ideal for static websites. | 快速 HTML 网页爬虫，无需浏览器，适合静态网站。",
-  "b": "url",
+  "description": "Fast web scraper using Cheerio for HTML parsing. Supports custom page functions, link discovery, and depth control. | 快速网页爬虫，使用 Cheerio 解析 HTML。支持自定义页面函数、链接发现和深度控制。",
+  "b": "startUrls",
   "properties": [
     {
       "title": "起始 URL | Start URLs",
-      "name": "url",
+      "name": "startUrls",
       "type": "array",
       "editor": "requestList",
       "description": "URLs to start crawling from | 开始爬取的 URL 列表",
@@ -18,15 +18,23 @@
       "name": "linkSelector",
       "type": "string",
       "editor": "input",
-      "description": "CSS selector for finding links. Leave empty to disable. | 用于发现链接的 CSS 选择器，留空禁用",
+      "description": "CSS selector for finding links. Leave empty to disable link discovery. | 用于发现链接的 CSS 选择器，留空禁用链接发现",
       "default": "a[href]"
     },
     {
-      "title": "排除 URL 模式 | Exclude URL Patterns",
+      "title": "Glob 模式 | Glob Patterns",
+      "name": "globPatterns",
+      "type": "array",
+      "editor": "stringList",
+      "description": "Only crawl URLs matching these glob patterns (e.g., https://example.com/blog/*). | 只爬取匹配这些 glob 模式的 URL",
+      "default": []
+    },
+    {
+      "title": "排除模式 | Exclude Patterns",
       "name": "excludePatterns",
       "type": "array",
       "editor": "stringList",
-      "description": "URL patterns to skip (e.g., /login, /admin). | 要跳过的 URL 模式",
+      "description": "URL patterns to skip (e.g., /login, /admin, *.pdf). | 要跳过的 URL 模式",
       "default": []
     },
     {
@@ -50,40 +58,40 @@
       "name": "maxConcurrency",
       "type": "integer",
       "editor": "number",
-      "description": "Concurrent requests. Higher = faster but more load. | 并发请求数，越高越快但负载越大",
+      "description": "Maximum concurrent requests. | 最大并发请求数",
       "default": 10
     },
     {
-      "title": "请求超时(秒) | Timeout (secs)",
-      "name": "requestTimeoutSecs",
+      "title": "页面超时(秒) | Page Timeout (secs)",
+      "name": "pageLoadTimeoutSecs",
       "type": "integer",
       "editor": "number",
-      "description": "HTTP request timeout. | HTTP 请求超时时间",
-      "default": 30
+      "description": "Page load timeout in seconds. | 页面加载超时时间（秒）",
+      "default": 60
     },
     {
       "title": "重试次数 | Retries",
       "name": "maxRequestRetries",
       "type": "integer",
       "editor": "number",
-      "description": "Retries for failed requests. | 失败请求重试次数",
-      "default": 2
+      "description": "Maximum retries for failed requests. | 失败请求重试次数",
+      "default": 3
     },
     {
-      "title": "请求延迟(ms) | Delay (ms)",
-      "name": "requestDelayMs",
-      "type": "integer",
-      "editor": "number",
-      "description": "Delay between requests. Prevents rate limiting. | 请求间隔，防止被限流",
-      "default": 500
-    },
-    {
-      "title": "跨域爬取 | Cross-Domain",
-      "name": "crossDomain",
+      "title": "保留 URL Fragment | Keep URL Fragments",
+      "name": "keepUrlFragments",
       "type": "boolean",
       "editor": "switch",
-      "description": "Allow crawling other domains. | 允许爬取其他域名",
+      "description": "Keep URL fragments (hash) in links. | 保留 URL 中的 Fragment（哈希部分）",
       "default": false
+    },
+    {
+      "title": "忽略 SSL 错误 | Ignore SSL Errors",
+      "name": "ignoreSslErrors",
+      "type": "boolean",
+      "editor": "switch",
+      "description": "Ignore SSL certificate errors. | 忽略 SSL 证书错误",
+      "default": true
     },
     {
       "title": "调试日志 | Debug Log",

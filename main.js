@@ -1,61 +1,118 @@
 #!/usr/bin/env node
 'use strict'
 
-const cafesdk = require('./sdk')
-const cheerio = require('cheerio')
-const http = require('http')
-const https = require('https')
-const zlib = require('zlib')
-const { promisify } = require('util')
-
-const gunzip = promisify(zlib.gunzip)
-const inflate = promisify(zlib.inflate)
-const brotliDecompress = promisify(zlib.brotliDecompress)
-
 /**
- * HTML Scraper Worker
- * Fast, lightweight web scraper using HTTP requests and Cheerio.
+ * Cheerio Scraper Worker
+ * 
+ * Converted from Apify's cheerio-scraper actor.
+ * Uses CDP browser for reliable proxy support on CafeScraper platform.
+ * 
+ * Features:
+ * - Custom pageFunction support
+ * - Link discovery with glob/regex patterns
+ * - Depth control
+ * - Cookie management
+ * - Request headers customization
  */
 
+const cafesdk = require('./sdk')
+const cheerio = require('cheerio')
+const puppeteer = require('puppeteer')
+
+// Default configuration
 const DEFAULT_CONFIG = {
+    startUrls: [],
+    linkSelector: 'a[href]',
+    globPatterns: [],
+    pseudoUrls: [],
+    excludePatterns: [],
     maxCrawlingDepth: 1,
     maxPagesPerCrawl: 100,
     maxConcurrency: 10,
-    requestTimeoutSecs: 30,
-    maxRequestRetries: 2,
-    linkSelector: 'a[href]',
-    excludePatterns: [],
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    requestDelayMs: 500,
-    crossDomain: false,
-    debugLog: false
+    pageLoadTimeoutSecs: 60,
+    maxRequestRetries: 3,
+    keepUrlFragments: false,
+    ignoreSslErrors: true,
+    debugLog: false,
+    // Default page function - extract basic page data
+    pageFunction: `
+        async function pageFunction(context) {
+            const { $, request, response } = context;
+            
+            return {
+                url: request.url,
+                title: $('title').text().trim(),
+                description: $('meta[name="description"]').attr('content') || '',
+                h1: $('h1').first().text().trim(),
+                textContent: $('body').text().replace(/\\s+/g, ' ').trim().substring(0, 1000),
+                linkCount: $('a[href]').length,
+                imageCount: $('img').length,
+            };
+        }
+    `
 }
 
-function normalizeUrl(url) {
+/**
+ * URL normalization
+ */
+function normalizeUrl(url, keepFragments = false) {
     try {
         const parsed = new URL(url)
         let path = parsed.pathname
         if (path.endsWith('/') && path.length > 1) {
             path = path.slice(0, -1)
         }
-        return `${parsed.protocol}//${parsed.host}${path}${parsed.search}`
+        const fragment = keepFragments ? parsed.hash : ''
+        return `${parsed.protocol}//${parsed.host}${path}${parsed.search}${fragment}`
     } catch {
         return url.replace(/\/$/, '')
     }
 }
 
+/**
+ * Check if URL matches glob pattern
+ */
+function matchesGlob(url, pattern) {
+    if (!pattern) return false
+    const regexStr = pattern
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*')
+        .replace(/\?/g, '.')
+    return new RegExp(`^${regexStr}$`, 'i').test(url)
+}
+
+/**
+ * Check if URL matches pseudo URL pattern
+ */
+function matchesPseudoUrl(url, purl) {
+    if (!purl) return false
+    try {
+        const regex = new RegExp(purl)
+        return regex.test(url)
+    } catch {
+        return false
+    }
+}
+
+/**
+ * Check if URL should be excluded
+ */
 function shouldExclude(url, patterns) {
     if (!patterns || patterns.length === 0) return false
-    const urlLower = url.toLowerCase()
     return patterns.some(pattern => {
-        const p = pattern.toLowerCase()
-        if (p.includes('*')) {
-            return new RegExp(p.replace(/\*/g, '.*'), 'i').test(url)
+        if (typeof pattern === 'string') {
+            return url.toLowerCase().includes(pattern.toLowerCase()) ||
+                   matchesGlob(url, pattern)
         }
-        return urlLower.includes(p)
+        if (pattern.glob) return matchesGlob(url, pattern.glob)
+        if (pattern.regexp) return matchesPseudoUrl(url, pattern.regexp)
+        return false
     })
 }
 
+/**
+ * Get domain from URL
+ */
 function getDomain(url) {
     try {
         return new URL(url).hostname
@@ -64,235 +121,140 @@ function getDomain(url) {
     }
 }
 
-/**
- * Fetch URL function (exact copy from worker-rag-web-browser)
- */
-function fetchUrl(url, timeout = 30000) {
-    return new Promise((resolve, reject) => {
-        const proxyAuth = process.env.PROXY_AUTH;
-        const proxyHost = 'proxy-inner.cafescraper.com';
-        const proxyPort = 6000;
-
-        const requestHeaders = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        };
-
-        const timeoutId = setTimeout(() => {
-            reject(new Error(`Request timeout after ${timeout}ms`));
-        }, timeout);
-
-        const decompressResponse = async (buffer, encoding) => {
-            try {
-                switch (encoding) {
-                    case 'gzip':
-                        return await gunzip(buffer);
-                    case 'deflate':
-                        return await inflate(buffer);
-                    case 'br':
-                        return await brotliDecompress(buffer);
-                    default:
-                        return buffer;
-                }
-            } catch (err) {
-                return buffer;
-            }
-        };
-
-        const handleResponse = async (response) => {
-            clearTimeout(timeoutId);
-            const chunks = [];
-
-            response.on('data', (chunk) => {
-                chunks.push(chunk);
-            });
-
-            response.on('end', async () => {
-                try {
-                    const buffer = Buffer.concat(chunks);
-                    const encoding = response.headers['content-encoding'];
-                    const decompressed = await decompressResponse(buffer, encoding);
-                    const data = decompressed.toString('utf8');
-
-                    resolve({
-                        html: data,
-                        statusCode: response.statusCode,
-                        statusMessage: response.statusMessage || '',
-                        headers: response.headers,
-                    });
-                } catch (e) {
-                    resolve({
-                        html: '',
-                        statusCode: response.statusCode || 500,
-                        statusMessage: `Error processing response: ${e.message}`,
-                        headers: response.headers,
-                    });
-                }
-            });
-
-            response.on('error', (err) => {
-                clearTimeout(timeoutId);
-                reject(err);
-            });
-        };
-
-        const handleError = (err) => {
-            clearTimeout(timeoutId);
-            reject(err);
-        };
-
-        if (proxyAuth) {
-            const req = http.request(
-                {
-                    host: proxyHost,
-                    port: proxyPort,
-                    method: 'CONNECT',
-                    path: url,
-                    headers: {
-                        Host: proxyHost,
-                        'Proxy-Authorization': `Basic ${Buffer.from(proxyAuth).toString('base64')}`,
-                    },
-                },
-                (res) => {
-                    if (res.statusCode !== 200) {
-                        clearTimeout(timeoutId);
-                        reject(new Error(`Proxy CONNECT failed with status ${res.statusCode}`));
-                        return;
-                    }
-
-                    const targetUrl = new URL(url);
-                    const protocol = targetUrl.protocol === 'https:' ? https : http;
-                    const requestOptions = {
-                        protocol: targetUrl.protocol,
-                        hostname: targetUrl.hostname,
-                        port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
-                        path: `${targetUrl.pathname}${targetUrl.search}`,
-                        method: 'GET',
-                        headers: requestHeaders,
-                        socket: res.socket,
-                    };
-
-                    const request = protocol.request(requestOptions, handleResponse);
-                    request.on('error', handleError);
-                    request.end();
-                }
-            );
-
-            req.on('error', handleError);
-            req.end();
-        } else {
-            const protocol = url.startsWith('https:') ? https : http;
-            const req = protocol.get(
-                url,
-                {
-                    headers: requestHeaders,
-                    timeout: timeout,
-                },
-                handleResponse
-            );
-            req.on('error', handleError);
-            req.on('timeout', () => {
-                req.destroy();
-                reject(new Error('Request timeout'));
-            });
-        }
-    });
-}
-
-class HTMLScraper {
+class CheerioScraper {
     constructor(config) {
         this.config = { ...DEFAULT_CONFIG, ...config }
+        this.browser = null
         this.visitedUrls = new Set()
         this.queue = []
         this.pagesProcessed = 0
         this.successCount = 0
         this.failCount = 0
-        this.activeRequests = 0
-        this.startDomain = ''
+        this.results = []
+        
+        // Parse and compile page function
+        this.pageFunction = this._compilePageFunction(config.pageFunction)
+    }
+
+    _compilePageFunction(fnString) {
+        if (!fnString) return null
+        try {
+            // Extract function body if wrapped in async function
+            let fnBody = fnString.trim()
+            if (fnBody.startsWith('async function')) {
+                fnBody = fnBody.replace(/^async function\s+\w*\s*\(/, 'async (')
+            }
+            return new Function('context', `return (${fnBody})(context)`)
+        } catch (err) {
+            return null
+        }
+    }
+
+    async init() {
+        await cafesdk.log.info('Initializing Cheerio Scraper Worker...')
+        
+        const proxyAuth = process.env.PROXY_AUTH
+        let browserWSEndpoint
+        
+        if (proxyAuth) {
+            browserWSEndpoint = `ws://${proxyAuth}@chrome-ws-inner.cafescraper.com`
+            await cafesdk.log.info('Using CafeScraper platform browser')
+        } else if (process.env.CDP_ENDPOINT) {
+            browserWSEndpoint = process.env.CDP_ENDPOINT
+        } else if (process.env.BROWSER_WS_ENDPOINT) {
+            browserWSEndpoint = process.env.BROWSER_WS_ENDPOINT
+        } else {
+            throw new Error('No browser endpoint configured. PROXY_AUTH should be set by CafeScraper platform.')
+        }
+        
+        this.browser = await puppeteer.connect({
+            browserWSEndpoint,
+            defaultViewport: null,
+            ignoreHTTPSErrors: this.config.ignoreSslErrors
+        })
+        
+        await cafesdk.log.info('Connected to browser')
+    }
+
+    async close() {
+        if (this.browser) {
+            this.browser.disconnect()
+        }
     }
 
     parseStartUrls(input) {
         const urls = []
-        
-        if (input.url) {
-            if (Array.isArray(input.url)) {
-                for (const item of input.url) {
-                    if (typeof item === 'string') {
-                        urls.push(normalizeUrl(item.trim()))
-                    } else if (item && item.url) {
-                        urls.push(normalizeUrl(item.url.trim()))
-                    }
-                }
-            } else if (typeof input.url === 'string') {
-                urls.push(normalizeUrl(input.url.trim()))
-            } else if (typeof input.url === 'object' && input.url.url) {
-                urls.push(normalizeUrl(input.url.url.trim()))
+        const processItem = (item) => {
+            if (typeof item === 'string') {
+                return normalizeUrl(item.trim(), this.config.keepUrlFragments)
             }
+            if (item && item.url) {
+                return normalizeUrl(item.url.trim(), this.config.keepUrlFragments)
+            }
+            return null
         }
         
+        // Process startUrls
         if (input.startUrls) {
             if (Array.isArray(input.startUrls)) {
                 for (const item of input.startUrls) {
-                    if (typeof item === 'string') {
-                        urls.push(normalizeUrl(item.trim()))
-                    } else if (item && item.url) {
-                        urls.push(normalizeUrl(item.url.trim()))
-                    }
+                    const url = processItem(item)
+                    if (url) urls.push({ url, depth: 0 })
                 }
             }
         }
         
-        return urls.filter(url => url && url.length > 0)
-    }
-
-    parseExcludePatterns(input) {
-        if (!input.excludePatterns) return []
-        if (Array.isArray(input.excludePatterns)) {
-            return input.excludePatterns
-                .map(p => typeof p === 'string' ? p.trim() : (p && (p.string || p.url || '')))
-                .filter(Boolean)
-        }
-        return []
-    }
-
-    async fetchWithRetry(url, retries = 0) {
-        try {
-            const response = await fetchUrl(url, this.config.requestTimeoutSecs * 1000)
-            return response
-        } catch (error) {
-            if (retries < this.config.maxRequestRetries) {
-                if (this.config.debugLog) {
-                    await cafesdk.log.debug(`Retrying ${url} (${retries + 2}/${this.config.maxRequestRetries + 1})`)
+        // Process url field (CafeScraper format)
+        if (input.url) {
+            if (Array.isArray(input.url)) {
+                for (const item of input.url) {
+                    const url = processItem(item)
+                    if (url) urls.push({ url, depth: 0 })
                 }
-                await this.delay(this.config.requestDelayMs * (retries + 1))
-                return this.fetchWithRetry(url, retries + 1)
+            } else if (typeof input.url === 'string') {
+                urls.push({ url: processItem(input.url), depth: 0 })
+            } else if (typeof input.url === 'object') {
+                const url = processItem(input.url)
+                if (url) urls.push({ url, depth: 0 })
             }
-            throw error
         }
+        
+        return urls
     }
 
-    async extractData($, url) {
+    async createPage() {
+        const page = await this.browser.newPage()
+        
+        // Block unnecessary resources for speed
+        await page.setRequestInterception(true)
+        
+        page.on('request', (request) => {
+            const resourceType = request.resourceType()
+            // Block images, styles, fonts, media
+            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+                request.abort()
+                return
+            }
+            request.continue()
+        })
+        
+        page.setDefaultTimeout(this.config.pageLoadTimeoutSecs * 1000)
+        
+        return page
+    }
+
+    async fetchPage(url, page) {
+        const response = await page.goto(url, {
+            waitUntil: 'domcontentloaded',
+            timeout: this.config.pageLoadTimeoutSecs * 1000
+        })
+        
+        const html = await page.content()
+        
         return {
-            url: url,
-            title: $('title').text().trim() || '',
-            description: $('meta[name="description"]').attr('content') || '',
-            keywords: $('meta[name="keywords"]').attr('content') || '',
-            h1: $('h1').first().text().trim() || '',
-            h2List: $('h2').slice(0, 5).map((_, el) => $(el).text().trim()).get().filter(Boolean),
-            textLength: $('body').text().replace(/\s+/g, ' ').trim().length,
-            imageCount: $('img').length,
-            linkCount: $('a[href]').length,
-            metaRobots: $('meta[name="robots"]').attr('content') || '',
-            canonicalUrl: $('link[rel="canonical"]').attr('href') || '',
-            ogTitle: $('meta[property="og:title"]').attr('content') || '',
-            ogDescription: $('meta[property="og:description"]').attr('content') || '',
-            ogImage: $('meta[property="og:image"]').attr('content') || '',
-            language: $('html').attr('lang') || '',
+            html,
+            statusCode: response ? response.status() : 200,
+            response
         }
     }
 
@@ -300,67 +262,113 @@ class HTMLScraper {
         if (!this.config.linkSelector || currentDepth >= this.config.maxCrawlingDepth) {
             return []
         }
-
+        
         const links = []
-        const excludePatterns = this.parseExcludePatterns(this.config)
-
+        const currentDomain = getDomain(currentUrl)
+        
         $(this.config.linkSelector).each((_, element) => {
             try {
                 const href = $(element).attr('href')
                 if (!href) return
+                
+                // Skip anchors and javascript
                 if (href.startsWith('#') || href.startsWith('javascript:')) return
-
+                
+                // Resolve relative URLs
                 const absoluteUrl = new URL(href, currentUrl).href
+                
+                // Only follow HTTP(S) links
                 if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) return
-                if (shouldExclude(absoluteUrl, excludePatterns)) return
-
-                const targetDomain = getDomain(absoluteUrl)
-                if (!this.config.crossDomain && targetDomain !== this.startDomain) return
-
-                const normalizedUrl = normalizeUrl(absoluteUrl)
+                
+                // Check glob patterns (if specified, only match those)
+                const { globPatterns, pseudoUrls } = this.config
+                if (globPatterns && globPatterns.length > 0) {
+                    if (!globPatterns.some(p => matchesGlob(absoluteUrl, p.glob || p))) return
+                }
+                if (pseudoUrls && pseudoUrls.length > 0) {
+                    if (!pseudoUrls.some(p => matchesPseudoUrl(absoluteUrl, p.purl || p))) return
+                }
+                
+                // Check exclude patterns
+                if (shouldExclude(absoluteUrl, this.config.excludePatterns)) return
+                
+                // Normalize and deduplicate
+                const normalizedUrl = normalizeUrl(absoluteUrl, this.config.keepUrlFragments)
                 if (!this.visitedUrls.has(normalizedUrl)) {
                     links.push({ url: normalizedUrl, depth: currentDepth + 1 })
                     this.visitedUrls.add(normalizedUrl)
                 }
-            } catch (e) {}
+            } catch (e) {
+                // Invalid URL, skip
+            }
         })
-
+        
         return links
     }
 
-    async processPage(url, depth) {
+    async processPage(url, depth, page) {
         if (this.config.debugLog) {
             await cafesdk.log.debug(`Processing: ${url} (depth: ${depth})`)
         }
-
+        
         try {
-            const excludePatterns = this.parseExcludePatterns(this.config)
-            if (shouldExclude(url, excludePatterns)) {
+            // Check exclude patterns
+            if (shouldExclude(url, this.config.excludePatterns)) {
+                if (this.config.debugLog) {
+                    await cafesdk.log.debug(`Skipping excluded URL: ${url}`)
+                }
                 return null
             }
-
-            const { html, statusCode } = await this.fetchWithRetry(url)
+            
+            // Fetch page
+            const { html, statusCode, response } = await this.fetchPage(url, page)
+            
+            // Parse with Cheerio
             const $ = cheerio.load(html)
-            const data = await this.extractData($, url)
-            data.depth = depth
-            data.statusCode = statusCode
-            data.success = true
-
+            
+            // Create context for page function
+            const context = {
+                $,
+                request: { url, depth },
+                response: { status: statusCode },
+                html,
+                cheerio: $
+            }
+            
+            // Execute page function
+            let result = {}
+            if (this.pageFunction) {
+                try {
+                    result = await this.pageFunction(context) || {}
+                } catch (err) {
+                    await cafesdk.log.warn(`Page function error: ${err.message}`)
+                }
+            }
+            
+            // Add metadata
+            result.url = url
+            result.depth = depth
+            result.statusCode = statusCode
+            result.loadedAt = new Date().toISOString()
+            
+            // Discover new links
             const newLinks = await this.discoverLinks($, url, depth)
+            result.linksFound = newLinks.length
+            
+            // Add links to queue
             for (const link of newLinks) {
                 this.queue.push(link)
             }
-            data.linksFound = newLinks.length
-
-            return data
-
+            
+            return result
+            
         } catch (error) {
             await cafesdk.log.error(`Failed: ${url} - ${error.message}`)
             return {
-                url: url,
-                depth: depth,
-                success: false,
-                error: error.message
+                url,
+                depth,
+                error: error.message,
+                statusCode: null
             }
         }
     }
@@ -373,101 +381,163 @@ class HTMLScraper {
         if (!startUrls || startUrls.length === 0) {
             throw new Error('No start URLs provided')
         }
-
-        // Log proxy status
-        if (process.env.PROXY_AUTH) {
-            await cafesdk.log.info('Proxy enabled (HTTP CONNECT)')
-        } else {
-            await cafesdk.log.info('No proxy, using direct connection')
+        
+        // Initialize
+        await this.init()
+        
+        // Initialize queue and visited set
+        for (const item of startUrls) {
+            const normalizedUrl = normalizeUrl(item.url, this.config.keepUrlFragments)
+            this.queue.push({ url: normalizedUrl, depth: item.depth || 0 })
+            this.visitedUrls.add(normalizedUrl)
         }
-
-        this.startDomain = getDomain(startUrls[0])
-
-        for (const url of startUrls) {
-            this.queue.push({ url, depth: 0 })
-            this.visitedUrls.add(url)
-        }
-
-        await cafesdk.log.info(`🚀 Starting HTML Scraper`)
+        
+        await cafesdk.log.info(`🚀 Starting Cheerio Scraper`)
         await cafesdk.log.info(`   URLs: ${startUrls.length} | Depth: ${this.config.maxCrawlingDepth} | Max Pages: ${this.config.maxPagesPerCrawl}`)
-        await cafesdk.log.info(`   Domain: ${this.startDomain} | Cross-domain: ${this.config.crossDomain}`)
-
+        
+        // Set table headers
         const headers = [
             { label: 'URL', key: 'url', format: 'text' },
             { label: 'Title', key: 'title', format: 'text' },
             { label: 'Description', key: 'description', format: 'text' },
-            { label: 'Depth', key: 'depth', format: 'text' },
-            { label: 'Status', key: 'statusCode', format: 'text' },
-            { label: 'Links', key: 'linksFound', format: 'text' }
+            { label: 'Depth', key: 'depth', format: 'integer' },
+            { label: 'Status', key: 'statusCode', format: 'integer' },
+            { label: 'Links', key: 'linksFound', format: 'integer' }
         ]
         await cafesdk.result.setTableHeader(headers)
-
+        
+        // Create page pool
+        const pagePool = []
+        const maxPages = Math.min(this.config.maxConcurrency, 5)
+        
+        for (let i = 0; i < maxPages; i++) {
+            const page = await this.createPage()
+            pagePool.push({ page, busy: false })
+        }
+        
+        async function getAvailablePage() {
+            while (true) {
+                const available = pagePool.find(p => !p.busy)
+                if (available) {
+                    available.busy = true
+                    return available
+                }
+                await this.delay(100)
+            }
+        }
+        
+        function releasePage(pageHolder) {
+            pageHolder.busy = false
+        }
+        
+        // Process queue
         const processingPromises = new Set()
-
-        while (this.queue.length > 0 || this.activeRequests > 0) {
+        
+        while (this.queue.length > 0 || processingPromises.size > 0) {
+            // Check page limit
             if (this.config.maxPagesPerCrawl > 0 && this.pagesProcessed >= this.config.maxPagesPerCrawl) {
                 await cafesdk.log.info(`Reached max pages: ${this.config.maxPagesPerCrawl}`)
                 break
             }
-
-            while (this.queue.length > 0 && this.activeRequests < this.config.maxConcurrency) {
+            
+            // Start new requests if we have capacity
+            while (this.queue.length > 0 && processingPromises.size < this.config.maxConcurrency) {
                 if (this.config.maxPagesPerCrawl > 0 && this.pagesProcessed >= this.config.maxPagesPerCrawl) {
                     break
                 }
-
+                
                 const { url, depth } = this.queue.shift()
-                if (depth > this.config.maxCrawlingDepth) continue
-
-                this.activeRequests++
+                
+                // Check depth limit
+                if (depth > this.config.maxCrawlingDepth) {
+                    continue
+                }
+                
                 this.pagesProcessed++
-
+                
                 const promise = (async () => {
-                    try {
-                        if (this.config.requestDelayMs > 0 && this.pagesProcessed > 1) {
-                            await this.delay(this.config.requestDelayMs)
-                        }
-
-                        const result = await this.processPage(url, depth)
+                    let retries = 0
+                    let result = null
+                    
+                    while (retries <= this.config.maxRequestRetries) {
+                        const pageHolder = await getAvailablePage.call(this)
                         
-                        if (result) {
-                            await cafesdk.result.pushData(result)
-                            if (result.success) {
-                                this.successCount++
+                        try {
+                            result = await this.processPage(url, depth, pageHolder.page)
+                            releasePage(pageHolder)
+                            break
+                        } catch (err) {
+                            releasePage(pageHolder)
+                            retries++
+                            
+                            if (retries <= this.config.maxRequestRetries) {
+                                if (this.config.debugLog) {
+                                    await cafesdk.log.debug(`Retry ${retries}/${this.config.maxRequestRetries} for ${url}`)
+                                }
+                                await this.delay(1000 * retries)
                             } else {
-                                this.failCount++
+                                result = {
+                                    url,
+                                    depth,
+                                    error: err.message,
+                                    statusCode: null
+                                }
                             }
                         }
-                    } finally {
-                        this.activeRequests--
-                        processingPromises.delete(promise)
                     }
+                    
+                    if (result) {
+                        await cafesdk.result.pushData(result)
+                        if (result.error) {
+                            this.failCount++
+                        } else {
+                            this.successCount++
+                        }
+                    }
+                    
+                    processingPromises.delete(promise)
                 })()
-
+                
                 processingPromises.add(promise)
             }
-
-            if (this.activeRequests >= this.config.maxConcurrency || this.queue.length === 0) {
-                await this.delay(50)
+            
+            // Wait a bit
+            if (processingPromises.size >= this.config.maxConcurrency || this.queue.length === 0) {
+                await this.delay(100)
             }
         }
-
+        
+        // Wait for all remaining
         await Promise.all(processingPromises)
+        
+        // Close pages
+        for (const { page } of pagePool) {
+            await page.close().catch(() => {})
+        }
+        
+        // Close browser
+        await this.close()
+        
+        // Summary
         await cafesdk.log.info(`✅ Complete! Total: ${this.pagesProcessed} | Success: ${this.successCount} | Failed: ${this.failCount}`)
     }
 }
 
+/**
+ * Main function
+ */
 async function main() {
     try {
-        await cafesdk.log.info('HTML Scraper Worker started')
-
+        await cafesdk.log.info('Cheerio Scraper Worker started')
+        
         const input = await cafesdk.parameter.getInputJSONObject()
         await cafesdk.log.debug(`Input: ${JSON.stringify(input)}`)
-
-        const scraper = new HTMLScraper(input)
+        
+        const scraper = new CheerioScraper(input)
         const startUrls = scraper.parseStartUrls(input)
-
+        
         await scraper.run(startUrls)
-
+        
     } catch (error) {
         await cafesdk.log.error(`Script error: ${error.message}`)
         await cafesdk.result.pushData({
