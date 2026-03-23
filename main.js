@@ -14,9 +14,7 @@ const brotliDecompress = promisify(zlib.brotliDecompress)
 
 /**
  * HTML Scraper Worker
- * 
- * A fast, lightweight web scraper using HTTP requests and Cheerio.
- * No browser needed - 10-50x faster than browser-based scrapers!
+ * Fast, lightweight web scraper using HTTP requests and Cheerio.
  */
 
 const DEFAULT_CONFIG = {
@@ -40,12 +38,7 @@ function normalizeUrl(url) {
         if (path.endsWith('/') && path.length > 1) {
             path = path.slice(0, -1)
         }
-        const port = parsed.port
-        const defaultPorts = { 'http:': '80', 'https:': '443' }
-        const host = port && defaultPorts[parsed.protocol] === port
-            ? parsed.hostname
-            : parsed.host
-        return `${parsed.protocol}//${host}${path}${parsed.search}`
+        return `${parsed.protocol}//${parsed.host}${path}${parsed.search}`
     } catch {
         return url.replace(/\/$/, '')
     }
@@ -57,8 +50,7 @@ function shouldExclude(url, patterns) {
     return patterns.some(pattern => {
         const p = pattern.toLowerCase()
         if (p.includes('*')) {
-            const regex = new RegExp(p.replace(/\*/g, '.*'), 'i')
-            return regex.test(url)
+            return new RegExp(p.replace(/\*/g, '.*'), 'i').test(url)
         }
         return urlLower.includes(p)
     })
@@ -72,6 +64,146 @@ function getDomain(url) {
     }
 }
 
+/**
+ * Fetch URL function (exact copy from worker-rag-web-browser)
+ */
+function fetchUrl(url, timeout = 30000) {
+    return new Promise((resolve, reject) => {
+        const proxyAuth = process.env.PROXY_AUTH;
+        const proxyHost = 'proxy-inner.cafescraper.com';
+        const proxyPort = 6000;
+
+        const requestHeaders = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        };
+
+        const timeoutId = setTimeout(() => {
+            reject(new Error(`Request timeout after ${timeout}ms`));
+        }, timeout);
+
+        const decompressResponse = async (buffer, encoding) => {
+            try {
+                switch (encoding) {
+                    case 'gzip':
+                        return await gunzip(buffer);
+                    case 'deflate':
+                        return await inflate(buffer);
+                    case 'br':
+                        return await brotliDecompress(buffer);
+                    default:
+                        return buffer;
+                }
+            } catch (err) {
+                return buffer;
+            }
+        };
+
+        const handleResponse = async (response) => {
+            clearTimeout(timeoutId);
+            const chunks = [];
+
+            response.on('data', (chunk) => {
+                chunks.push(chunk);
+            });
+
+            response.on('end', async () => {
+                try {
+                    const buffer = Buffer.concat(chunks);
+                    const encoding = response.headers['content-encoding'];
+                    const decompressed = await decompressResponse(buffer, encoding);
+                    const data = decompressed.toString('utf8');
+
+                    resolve({
+                        html: data,
+                        statusCode: response.statusCode,
+                        statusMessage: response.statusMessage || '',
+                        headers: response.headers,
+                    });
+                } catch (e) {
+                    resolve({
+                        html: '',
+                        statusCode: response.statusCode || 500,
+                        statusMessage: `Error processing response: ${e.message}`,
+                        headers: response.headers,
+                    });
+                }
+            });
+
+            response.on('error', (err) => {
+                clearTimeout(timeoutId);
+                reject(err);
+            });
+        };
+
+        const handleError = (err) => {
+            clearTimeout(timeoutId);
+            reject(err);
+        };
+
+        if (proxyAuth) {
+            const req = http.request(
+                {
+                    host: proxyHost,
+                    port: proxyPort,
+                    method: 'CONNECT',
+                    path: url,
+                    headers: {
+                        Host: proxyHost,
+                        'Proxy-Authorization': `Basic ${Buffer.from(proxyAuth).toString('base64')}`,
+                    },
+                },
+                (res) => {
+                    if (res.statusCode !== 200) {
+                        clearTimeout(timeoutId);
+                        reject(new Error(`Proxy CONNECT failed with status ${res.statusCode}`));
+                        return;
+                    }
+
+                    const targetUrl = new URL(url);
+                    const protocol = targetUrl.protocol === 'https:' ? https : http;
+                    const requestOptions = {
+                        protocol: targetUrl.protocol,
+                        hostname: targetUrl.hostname,
+                        port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
+                        path: `${targetUrl.pathname}${targetUrl.search}`,
+                        method: 'GET',
+                        headers: requestHeaders,
+                        socket: res.socket,
+                    };
+
+                    const request = protocol.request(requestOptions, handleResponse);
+                    request.on('error', handleError);
+                    request.end();
+                }
+            );
+
+            req.on('error', handleError);
+            req.end();
+        } else {
+            const protocol = url.startsWith('https:') ? https : http;
+            const req = protocol.get(
+                url,
+                {
+                    headers: requestHeaders,
+                    timeout: timeout,
+                },
+                handleResponse
+            );
+            req.on('error', handleError);
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error('Request timeout'));
+            });
+        }
+    });
+}
+
 class HTMLScraper {
     constructor(config) {
         this.config = { ...DEFAULT_CONFIG, ...config }
@@ -82,16 +214,6 @@ class HTMLScraper {
         this.failCount = 0
         this.activeRequests = 0
         this.startDomain = ''
-        this.proxyAuth = null
-    }
-
-    async initProxy() {
-        this.proxyAuth = process.env.PROXY_AUTH || null
-        if (this.proxyAuth) {
-            await cafesdk.log.info('Proxy enabled (HTTP CONNECT)')
-        } else {
-            await cafesdk.log.info('No proxy, using direct connection')
-        }
     }
 
     parseStartUrls(input) {
@@ -138,149 +260,10 @@ class HTMLScraper {
         return []
     }
 
-    /**
-     * Fetch URL with proxy support (copied from worker-rag-web-browser)
-     */
-    fetchUrl(url, timeout = 30000) {
-        return new Promise((resolve, reject) => {
-            const proxyAuth = this.proxyAuth
-            const proxyHost = 'proxy-inner.cafescraper.com'
-            const proxyPort = 6000
-
-            const requestHeaders = {
-                'User-Agent': this.config.userAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
-
-            const timeoutId = setTimeout(() => {
-                reject(new Error(`Request timeout after ${timeout}ms`))
-            }, timeout)
-
-            const decompressResponse = async (buffer, encoding) => {
-                try {
-                    switch (encoding) {
-                        case 'gzip':
-                            return await gunzip(buffer)
-                        case 'deflate':
-                            return await inflate(buffer)
-                        case 'br':
-                            return await brotliDecompress(buffer)
-                        default:
-                            return buffer
-                    }
-                } catch (err) {
-                    return buffer
-                }
-            }
-
-            const handleResponse = async (response) => {
-                clearTimeout(timeoutId)
-                const chunks = []
-
-                response.on('data', (chunk) => {
-                    chunks.push(chunk)
-                })
-
-                response.on('end', async () => {
-                    try {
-                        const buffer = Buffer.concat(chunks)
-                        const encoding = response.headers['content-encoding']
-                        const decompressed = await decompressResponse(buffer, encoding)
-                        const data = decompressed.toString('utf8')
-
-                        resolve({
-                            html: data,
-                            statusCode: response.statusCode,
-                            statusMessage: response.statusMessage || '',
-                            headers: response.headers,
-                        })
-                    } catch (e) {
-                        resolve({
-                            html: '',
-                            statusCode: response.statusCode || 500,
-                            statusMessage: `Error processing response: ${e.message}`,
-                            headers: response.headers,
-                        })
-                    }
-                })
-
-                response.on('error', (err) => {
-                    clearTimeout(timeoutId)
-                    reject(err)
-                })
-            }
-
-            const handleError = (err) => {
-                clearTimeout(timeoutId)
-                reject(err)
-            }
-
-            if (proxyAuth) {
-                const req = http.request(
-                    {
-                        host: proxyHost,
-                        port: proxyPort,
-                        method: 'CONNECT',
-                        path: url,
-                        headers: {
-                            Host: proxyHost,
-                            'Proxy-Authorization': `Basic ${Buffer.from(proxyAuth).toString('base64')}`,
-                        },
-                    },
-                    (res) => {
-                        if (res.statusCode !== 200) {
-                            clearTimeout(timeoutId)
-                            reject(new Error(`Proxy CONNECT failed with status ${res.statusCode}`))
-                            return
-                        }
-
-                        const targetUrl = new URL(url)
-                        const protocol = targetUrl.protocol === 'https:' ? https : http
-                        const requestOptions = {
-                            protocol: targetUrl.protocol,
-                            hostname: targetUrl.hostname,
-                            port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
-                            path: `${targetUrl.pathname}${targetUrl.search}`,
-                            method: 'GET',
-                            headers: requestHeaders,
-                            socket: res.socket,
-                        }
-
-                        const request = protocol.request(requestOptions, handleResponse)
-                        request.on('error', handleError)
-                        request.end()
-                    }
-                )
-
-                req.on('error', handleError)
-                req.end()
-            } else {
-                const protocol = url.startsWith('https:') ? https : http
-                const req = protocol.get(
-                    url,
-                    {
-                        headers: requestHeaders,
-                        timeout: timeout,
-                    },
-                    handleResponse
-                )
-                req.on('error', handleError)
-                req.on('timeout', () => {
-                    req.destroy()
-                    reject(new Error('Request timeout'))
-                })
-            }
-        })
-    }
-
     async fetchWithRetry(url, retries = 0) {
         try {
-            return await this.fetchUrl(url, this.config.requestTimeoutSecs * 1000)
+            const response = await fetchUrl(url, this.config.requestTimeoutSecs * 1000)
+            return response
         } catch (error) {
             if (retries < this.config.maxRequestRetries) {
                 if (this.config.debugLog) {
@@ -391,7 +374,12 @@ class HTMLScraper {
             throw new Error('No start URLs provided')
         }
 
-        await this.initProxy()
+        // Log proxy status
+        if (process.env.PROXY_AUTH) {
+            await cafesdk.log.info('Proxy enabled (HTTP CONNECT)')
+        } else {
+            await cafesdk.log.info('No proxy, using direct connection')
+        }
 
         this.startDomain = getDomain(startUrls[0])
 
