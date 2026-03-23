@@ -13,22 +13,12 @@ const inflate = promisify(zlib.inflate)
 const brotliDecompress = promisify(zlib.brotliDecompress)
 
 /**
- * HTML Scraper Worker (formerly Cheerio Scraper)
+ * HTML Scraper Worker
  * 
  * A fast, lightweight web scraper using HTTP requests and Cheerio.
  * No browser needed - 10-50x faster than browser-based scrapers!
- * 
- * Features:
- * - HTTP-based crawling (no browser overhead)
- * - Fast HTML parsing with Cheerio
- * - Link discovery and depth control
- * - URL exclusion patterns
- * - Cross-domain option
- * - Concurrent requests with rate limiting
- * - CafeScraper proxy support (HTTP CONNECT)
  */
 
-// Default configuration
 const DEFAULT_CONFIG = {
     maxCrawlingDepth: 1,
     maxPagesPerCrawl: 100,
@@ -43,9 +33,6 @@ const DEFAULT_CONFIG = {
     debugLog: false
 }
 
-/**
- * URL normalization to prevent duplicates
- */
 function normalizeUrl(url) {
     try {
         const parsed = new URL(url)
@@ -64,9 +51,6 @@ function normalizeUrl(url) {
     }
 }
 
-/**
- * Check if URL matches any exclude pattern
- */
 function shouldExclude(url, patterns) {
     if (!patterns || patterns.length === 0) return false
     const urlLower = url.toLowerCase()
@@ -80,20 +64,6 @@ function shouldExclude(url, patterns) {
     })
 }
 
-/**
- * Check if URL belongs to same domain
- */
-function isSameDomain(url1, url2) {
-    try {
-        return new URL(url1).hostname === new URL(url2).hostname
-    } catch {
-        return false
-    }
-}
-
-/**
- * Extract domain from URL
- */
 function getDomain(url) {
     try {
         return new URL(url).hostname
@@ -115,25 +85,18 @@ class HTMLScraper {
         this.proxyAuth = null
     }
 
-    /**
-     * Initialize proxy for CafeScraper platform
-     */
     async initProxy() {
         this.proxyAuth = process.env.PROXY_AUTH || null
         if (this.proxyAuth) {
             await cafesdk.log.info('Proxy enabled (HTTP CONNECT)')
         } else {
-            await cafesdk.log.info('No proxy configured, using direct connection')
+            await cafesdk.log.info('No proxy, using direct connection')
         }
     }
 
-    /**
-     * Parse input URLs (supports multiple formats)
-     */
     parseStartUrls(input) {
         const urls = []
         
-        // Support 'url' field
         if (input.url) {
             if (Array.isArray(input.url)) {
                 for (const item of input.url) {
@@ -150,7 +113,6 @@ class HTMLScraper {
             }
         }
         
-        // Support 'startUrls' field
         if (input.startUrls) {
             if (Array.isArray(input.startUrls)) {
                 for (const item of input.startUrls) {
@@ -160,19 +122,12 @@ class HTMLScraper {
                         urls.push(normalizeUrl(item.url.trim()))
                     }
                 }
-            } else if (typeof input.startUrls === 'string') {
-                urls.push(normalizeUrl(input.startUrls.trim()))
-            } else if (typeof input.startUrls === 'object' && input.startUrls.url) {
-                urls.push(normalizeUrl(input.startUrls.url.trim()))
             }
         }
         
         return urls.filter(url => url && url.length > 0)
     }
 
-    /**
-     * Parse exclude patterns
-     */
     parseExcludePatterns(input) {
         if (!input.excludePatterns) return []
         if (Array.isArray(input.excludePatterns)) {
@@ -184,23 +139,24 @@ class HTMLScraper {
     }
 
     /**
-     * Fetch a page using HTTP CONNECT proxy (CafeScraper compatible)
+     * Fetch URL with proxy support (copied from worker-rag-web-browser)
      */
-    async fetchPage(url, retries = 0) {
-        const timeout = this.config.requestTimeoutSecs * 1000
-        const proxyHost = 'proxy-inner.cafescraper.com'
-        const proxyPort = 6000
-
-        const requestHeaders = {
-            'User-Agent': this.config.userAgent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-        }
-
+    fetchUrl(url, timeout = 30000) {
         return new Promise((resolve, reject) => {
+            const proxyAuth = this.proxyAuth
+            const proxyHost = 'proxy-inner.cafescraper.com'
+            const proxyPort = 6000
+
+            const requestHeaders = {
+                'User-Agent': this.config.userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+
             const timeoutId = setTimeout(() => {
                 reject(new Error(`Request timeout after ${timeout}ms`))
             }, timeout)
@@ -226,22 +182,30 @@ class HTMLScraper {
                 clearTimeout(timeoutId)
                 const chunks = []
 
-                response.on('data', (chunk) => chunks.push(chunk))
+                response.on('data', (chunk) => {
+                    chunks.push(chunk)
+                })
 
                 response.on('end', async () => {
                     try {
                         const buffer = Buffer.concat(chunks)
                         const encoding = response.headers['content-encoding']
                         const decompressed = await decompressResponse(buffer, encoding)
-                        const html = decompressed.toString('utf8')
+                        const data = decompressed.toString('utf8')
 
                         resolve({
-                            html,
-                            finalUrl: url,
-                            statusCode: response.statusCode
+                            html: data,
+                            statusCode: response.statusCode,
+                            statusMessage: response.statusMessage || '',
+                            headers: response.headers,
                         })
                     } catch (e) {
-                        reject(new Error(`Response processing error: ${e.message}`))
+                        resolve({
+                            html: '',
+                            statusCode: response.statusCode || 500,
+                            statusMessage: `Error processing response: ${e.message}`,
+                            headers: response.headers,
+                        })
                     }
                 })
 
@@ -256,8 +220,7 @@ class HTMLScraper {
                 reject(err)
             }
 
-            // Use proxy if available
-            if (this.proxyAuth) {
+            if (proxyAuth) {
                 const req = http.request(
                     {
                         host: proxyHost,
@@ -266,7 +229,7 @@ class HTMLScraper {
                         path: url,
                         headers: {
                             Host: proxyHost,
-                            'Proxy-Authorization': `Basic ${Buffer.from(this.proxyAuth).toString('base64')}`,
+                            'Proxy-Authorization': `Basic ${Buffer.from(proxyAuth).toString('base64')}`,
                         },
                     },
                     (res) => {
@@ -297,13 +260,13 @@ class HTMLScraper {
                 req.on('error', handleError)
                 req.end()
             } else {
-                // Direct connection (no proxy)
-                const targetUrl = new URL(url)
-                const protocol = targetUrl.protocol === 'https:' ? https : http
-                
+                const protocol = url.startsWith('https:') ? https : http
                 const req = protocol.get(
                     url,
-                    { headers: requestHeaders, timeout },
+                    {
+                        headers: requestHeaders,
+                        timeout: timeout,
+                    },
                     handleResponse
                 )
                 req.on('error', handleError)
@@ -315,12 +278,9 @@ class HTMLScraper {
         })
     }
 
-    /**
-     * Fetch with retry logic
-     */
     async fetchWithRetry(url, retries = 0) {
         try {
-            return await this.fetchPage(url)
+            return await this.fetchUrl(url, this.config.requestTimeoutSecs * 1000)
         } catch (error) {
             if (retries < this.config.maxRequestRetries) {
                 if (this.config.debugLog) {
@@ -333,9 +293,6 @@ class HTMLScraper {
         }
     }
 
-    /**
-     * Extract data from HTML
-     */
     async extractData($, url) {
         return {
             url: url,
@@ -356,9 +313,6 @@ class HTMLScraper {
         }
     }
 
-    /**
-     * Discover links on page
-     */
     async discoverLinks($, currentUrl, currentDepth) {
         if (!this.config.linkSelector || currentDepth >= this.config.maxCrawlingDepth) {
             return []
@@ -371,40 +325,26 @@ class HTMLScraper {
             try {
                 const href = $(element).attr('href')
                 if (!href) return
-
                 if (href.startsWith('#') || href.startsWith('javascript:')) return
 
                 const absoluteUrl = new URL(href, currentUrl).href
-
-                if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
-                    return
-                }
-
-                if (shouldExclude(absoluteUrl, excludePatterns)) {
-                    return
-                }
+                if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) return
+                if (shouldExclude(absoluteUrl, excludePatterns)) return
 
                 const targetDomain = getDomain(absoluteUrl)
-                if (!this.config.crossDomain && targetDomain !== this.startDomain) {
-                    return
-                }
+                if (!this.config.crossDomain && targetDomain !== this.startDomain) return
 
                 const normalizedUrl = normalizeUrl(absoluteUrl)
                 if (!this.visitedUrls.has(normalizedUrl)) {
                     links.push({ url: normalizedUrl, depth: currentDepth + 1 })
                     this.visitedUrls.add(normalizedUrl)
                 }
-            } catch (e) {
-                // Invalid URL, skip
-            }
+            } catch (e) {}
         })
 
         return links
     }
 
-    /**
-     * Process a single page
-     */
     async processPage(url, depth) {
         if (this.config.debugLog) {
             await cafesdk.log.debug(`Processing: ${url} (depth: ${depth})`)
@@ -413,27 +353,20 @@ class HTMLScraper {
         try {
             const excludePatterns = this.parseExcludePatterns(this.config)
             if (shouldExclude(url, excludePatterns)) {
-                if (this.config.debugLog) {
-                    await cafesdk.log.debug(`Skipping excluded URL: ${url}`)
-                }
                 return null
             }
 
-            const { html, finalUrl, statusCode } = await this.fetchWithRetry(url)
-
+            const { html, statusCode } = await this.fetchWithRetry(url)
             const $ = cheerio.load(html)
-
             const data = await this.extractData($, url)
             data.depth = depth
             data.statusCode = statusCode
             data.success = true
 
             const newLinks = await this.discoverLinks($, url, depth)
-
             for (const link of newLinks) {
                 this.queue.push(link)
             }
-
             data.linksFound = newLinks.length
 
             return data
@@ -449,22 +382,15 @@ class HTMLScraper {
         }
     }
 
-    /**
-     * Delay helper
-     */
     delay(ms) {
         return new Promise(resolve => setTimeout(resolve, ms))
     }
 
-    /**
-     * Run the scraper
-     */
     async run(startUrls) {
         if (!startUrls || startUrls.length === 0) {
             throw new Error('No start URLs provided')
         }
 
-        // Initialize proxy
         await this.initProxy()
 
         this.startDomain = getDomain(startUrls[0])
@@ -502,10 +428,7 @@ class HTMLScraper {
                 }
 
                 const { url, depth } = this.queue.shift()
-                
-                if (depth > this.config.maxCrawlingDepth) {
-                    continue
-                }
+                if (depth > this.config.maxCrawlingDepth) continue
 
                 this.activeRequests++
                 this.pagesProcessed++
@@ -541,14 +464,10 @@ class HTMLScraper {
         }
 
         await Promise.all(processingPromises)
-
         await cafesdk.log.info(`✅ Complete! Total: ${this.pagesProcessed} | Success: ${this.successCount} | Failed: ${this.failCount}`)
     }
 }
 
-/**
- * Main function
- */
 async function main() {
     try {
         await cafesdk.log.info('HTML Scraper Worker started')
@@ -571,5 +490,4 @@ async function main() {
     }
 }
 
-// Run
 main()
