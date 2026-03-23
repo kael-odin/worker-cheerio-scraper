@@ -244,17 +244,33 @@ class CheerioScraper {
     }
 
     async fetchPage(url, page) {
-        const response = await page.goto(url, {
-            waitUntil: 'domcontentloaded',
-            timeout: this.config.pageLoadTimeoutSecs * 1000
-        })
-        
-        const html = await page.content()
-        
-        return {
-            html,
-            statusCode: response ? response.status() : 200,
-            response
+        try {
+            const response = await page.goto(url, {
+                waitUntil: 'domcontentloaded',
+                timeout: this.config.pageLoadTimeoutSecs * 1000
+            })
+            
+            // Check if page is still available
+            if (page.isClosed()) {
+                throw new Error('Page was closed')
+            }
+            
+            const html = await page.content()
+            
+            return {
+                html,
+                statusCode: response ? response.status() : 200,
+                response
+            }
+        } catch (error) {
+            // Log specific error type
+            if (error.message && error.message.includes('timeout')) {
+                throw new Error(`Navigation timeout: ${url}`)
+            }
+            if (error.message && error.message.includes('net::')) {
+                throw new Error(`Network error: ${error.message}`)
+            }
+            throw error
         }
     }
 
@@ -320,8 +336,19 @@ class CheerioScraper {
                 return null
             }
             
-            // Fetch page
-            const { html, statusCode, response } = await this.fetchPage(url, page)
+            // Fetch page with timeout handling
+            let fetchResult
+            try {
+                fetchResult = await this.fetchPage(url, page)
+            } catch (fetchError) {
+                // If fetch fails, try to recover the page
+                if (this.config.debugLog) {
+                    await cafesdk.log.debug(`Fetch failed for ${url}: ${fetchError.message}`)
+                }
+                throw fetchError
+            }
+            
+            const { html, statusCode } = fetchResult
             
             // Parse with Cheerio
             const $ = cheerio.load(html)
@@ -363,11 +390,12 @@ class CheerioScraper {
             return result
             
         } catch (error) {
-            await cafesdk.log.error(`Failed: ${url} - ${error.message}`)
+            const errorMsg = error.message || 'Unknown error'
+            await cafesdk.log.error(`Failed: ${url} - ${errorMsg}`)
             return {
                 url,
                 depth,
-                error: error.message,
+                error: errorMsg,
                 statusCode: null
             }
         }
@@ -410,8 +438,12 @@ class CheerioScraper {
         const pagePool = []
         const maxPages = Math.min(this.config.maxConcurrency, 5)
         
+        async function createNewPage() {
+            return await this.createPage()
+        }
+        
         for (let i = 0; i < maxPages; i++) {
-            const page = await this.createPage()
+            const page = await createNewPage.call(this)
             pagePool.push({ page, busy: false })
         }
         
@@ -426,8 +458,19 @@ class CheerioScraper {
             }
         }
         
-        function releasePage(pageHolder) {
+        async function releasePage(pageHolder, recreate = false) {
             pageHolder.busy = false
+            // If page had error, close it and create new one
+            if (recreate) {
+                try {
+                    await pageHolder.page.close()
+                } catch (e) {}
+                try {
+                    pageHolder.page = await createNewPage.call(this)
+                } catch (e) {
+                    await cafesdk.log.warn(`Failed to recreate page: ${e.message}`)
+                }
+            }
         }
         
         // Process queue
@@ -458,28 +501,32 @@ class CheerioScraper {
                 const promise = (async () => {
                     let retries = 0
                     let result = null
+                    let lastError = null
                     
                     while (retries <= this.config.maxRequestRetries) {
                         const pageHolder = await getAvailablePage.call(this)
                         
                         try {
                             result = await this.processPage(url, depth, pageHolder.page)
-                            releasePage(pageHolder)
+                            await releasePage.call(this, pageHolder, false)
                             break
                         } catch (err) {
-                            releasePage(pageHolder)
+                            lastError = err
+                            const isTimeout = err.message && err.message.includes('timeout')
+                            // Recreate page on error (especially timeout)
+                            await releasePage.call(this, pageHolder, true)
                             retries++
                             
                             if (retries <= this.config.maxRequestRetries) {
                                 if (this.config.debugLog) {
-                                    await cafesdk.log.debug(`Retry ${retries}/${this.config.maxRequestRetries} for ${url}`)
+                                    await cafesdk.log.debug(`Retry ${retries}/${this.config.maxRequestRetries} for ${url}${isTimeout ? ' (timeout)' : ''}`)
                                 }
                                 await this.delay(1000 * retries)
                             } else {
                                 result = {
                                     url,
                                     depth,
-                                    error: err.message,
+                                    error: lastError.message || 'Unknown error',
                                     statusCode: null
                                 }
                             }
