@@ -107,10 +107,27 @@ class HTMLScraper {
     }
 
     /**
-     * Parse input URLs
+     * Parse input URLs (supports both 'url' and 'startUrls' formats)
      */
     parseStartUrls(input) {
         const urls = []
+        
+        // Support 'url' field (CafeScraper platform format)
+        if (input.url) {
+            if (Array.isArray(input.url)) {
+                for (const item of input.url) {
+                    if (typeof item === 'string') {
+                        urls.push(normalizeUrl(item.trim()))
+                    } else if (item.url) {
+                        urls.push(normalizeUrl(item.url.trim()))
+                    }
+                }
+            } else if (typeof input.url === 'string') {
+                urls.push(normalizeUrl(input.url.trim()))
+            }
+        }
+        
+        // Support 'startUrls' field (alternative format)
         if (input.startUrls) {
             if (Array.isArray(input.startUrls)) {
                 for (const item of input.startUrls) {
@@ -122,6 +139,7 @@ class HTMLScraper {
                 }
             }
         }
+        
         return urls.filter(url => url && url.length > 0)
     }
 
