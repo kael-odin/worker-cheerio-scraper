@@ -3,7 +3,14 @@
 
 const cafesdk = require('./sdk')
 const cheerio = require('cheerio')
-const { ProxyAgent, setGlobalDispatcher } = require('undici')
+const http = require('http')
+const https = require('https')
+const zlib = require('zlib')
+const { promisify } = require('util')
+
+const gunzip = promisify(zlib.gunzip)
+const inflate = promisify(zlib.inflate)
+const brotliDecompress = promisify(zlib.brotliDecompress)
 
 /**
  * HTML Scraper Worker (formerly Cheerio Scraper)
@@ -18,6 +25,7 @@ const { ProxyAgent, setGlobalDispatcher } = require('undici')
  * - URL exclusion patterns
  * - Cross-domain option
  * - Concurrent requests with rate limiting
+ * - CafeScraper proxy support (HTTP CONNECT)
  */
 
 // Default configuration
@@ -64,7 +72,6 @@ function shouldExclude(url, patterns) {
     const urlLower = url.toLowerCase()
     return patterns.some(pattern => {
         const p = pattern.toLowerCase()
-        // Support both glob-like and substring matching
         if (p.includes('*')) {
             const regex = new RegExp(p.replace(/\*/g, '.*'), 'i')
             return regex.test(url)
@@ -105,60 +112,58 @@ class HTMLScraper {
         this.failCount = 0
         this.activeRequests = 0
         this.startDomain = ''
-        this.proxyEnabled = false
+        this.proxyAuth = null
     }
 
     /**
      * Initialize proxy for CafeScraper platform
      */
     async initProxy() {
-        const proxyAuth = process.env.PROXY_AUTH
-        if (proxyAuth) {
-            const proxyDomain = 'proxy-inner.cafescraper.com:6000'
-            const proxyUrl = `socks5://${proxyAuth}@${proxyDomain}`
-            
-            try {
-                const agent = new ProxyAgent(proxyUrl)
-                setGlobalDispatcher(agent)
-                this.proxyEnabled = true
-                await cafesdk.log.info('Proxy enabled for external access')
-            } catch (err) {
-                await cafesdk.log.warn(`Proxy setup failed: ${err.message}`)
-            }
+        this.proxyAuth = process.env.PROXY_AUTH || null
+        if (this.proxyAuth) {
+            await cafesdk.log.info('Proxy enabled (HTTP CONNECT)')
+        } else {
+            await cafesdk.log.info('No proxy configured, using direct connection')
         }
     }
 
     /**
-     * Parse input URLs (supports both 'url' and 'startUrls' formats)
+     * Parse input URLs (supports multiple formats)
      */
     parseStartUrls(input) {
         const urls = []
         
-        // Support 'url' field (CafeScraper platform format)
+        // Support 'url' field
         if (input.url) {
             if (Array.isArray(input.url)) {
                 for (const item of input.url) {
                     if (typeof item === 'string') {
                         urls.push(normalizeUrl(item.trim()))
-                    } else if (item.url) {
+                    } else if (item && item.url) {
                         urls.push(normalizeUrl(item.url.trim()))
                     }
                 }
             } else if (typeof input.url === 'string') {
                 urls.push(normalizeUrl(input.url.trim()))
+            } else if (typeof input.url === 'object' && input.url.url) {
+                urls.push(normalizeUrl(input.url.url.trim()))
             }
         }
         
-        // Support 'startUrls' field (alternative format)
+        // Support 'startUrls' field
         if (input.startUrls) {
             if (Array.isArray(input.startUrls)) {
                 for (const item of input.startUrls) {
                     if (typeof item === 'string') {
                         urls.push(normalizeUrl(item.trim()))
-                    } else if (item.url) {
+                    } else if (item && item.url) {
                         urls.push(normalizeUrl(item.url.trim()))
                     }
                 }
+            } else if (typeof input.startUrls === 'string') {
+                urls.push(normalizeUrl(input.startUrls.trim()))
+            } else if (typeof input.startUrls === 'object' && input.startUrls.url) {
+                urls.push(normalizeUrl(input.startUrls.url.trim()))
             }
         }
         
@@ -172,56 +177,157 @@ class HTMLScraper {
         if (!input.excludePatterns) return []
         if (Array.isArray(input.excludePatterns)) {
             return input.excludePatterns
-                .map(p => typeof p === 'string' ? p.trim() : (p.string || ''))
+                .map(p => typeof p === 'string' ? p.trim() : (p && (p.string || p.url || '')))
                 .filter(Boolean)
         }
         return []
     }
 
     /**
-     * Fetch a page with retries
+     * Fetch a page using HTTP CONNECT proxy (CafeScraper compatible)
      */
     async fetchPage(url, retries = 0) {
-        const controller = new AbortController()
-        const timeoutId = setTimeout(
-            () => controller.abort(),
-            this.config.requestTimeoutSecs * 1000
-        )
+        const timeout = this.config.requestTimeoutSecs * 1000
+        const proxyHost = 'proxy-inner.cafescraper.com'
+        const proxyPort = 6000
 
+        const requestHeaders = {
+            'User-Agent': this.config.userAgent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        }
+
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                reject(new Error(`Request timeout after ${timeout}ms`))
+            }, timeout)
+
+            const decompressResponse = async (buffer, encoding) => {
+                try {
+                    switch (encoding) {
+                        case 'gzip':
+                            return await gunzip(buffer)
+                        case 'deflate':
+                            return await inflate(buffer)
+                        case 'br':
+                            return await brotliDecompress(buffer)
+                        default:
+                            return buffer
+                    }
+                } catch (err) {
+                    return buffer
+                }
+            }
+
+            const handleResponse = async (response) => {
+                clearTimeout(timeoutId)
+                const chunks = []
+
+                response.on('data', (chunk) => chunks.push(chunk))
+
+                response.on('end', async () => {
+                    try {
+                        const buffer = Buffer.concat(chunks)
+                        const encoding = response.headers['content-encoding']
+                        const decompressed = await decompressResponse(buffer, encoding)
+                        const html = decompressed.toString('utf8')
+
+                        resolve({
+                            html,
+                            finalUrl: url,
+                            statusCode: response.statusCode
+                        })
+                    } catch (e) {
+                        reject(new Error(`Response processing error: ${e.message}`))
+                    }
+                })
+
+                response.on('error', (err) => {
+                    clearTimeout(timeoutId)
+                    reject(err)
+                })
+            }
+
+            const handleError = (err) => {
+                clearTimeout(timeoutId)
+                reject(err)
+            }
+
+            // Use proxy if available
+            if (this.proxyAuth) {
+                const req = http.request(
+                    {
+                        host: proxyHost,
+                        port: proxyPort,
+                        method: 'CONNECT',
+                        path: url,
+                        headers: {
+                            Host: proxyHost,
+                            'Proxy-Authorization': `Basic ${Buffer.from(this.proxyAuth).toString('base64')}`,
+                        },
+                    },
+                    (res) => {
+                        if (res.statusCode !== 200) {
+                            clearTimeout(timeoutId)
+                            reject(new Error(`Proxy CONNECT failed with status ${res.statusCode}`))
+                            return
+                        }
+
+                        const targetUrl = new URL(url)
+                        const protocol = targetUrl.protocol === 'https:' ? https : http
+                        const requestOptions = {
+                            protocol: targetUrl.protocol,
+                            hostname: targetUrl.hostname,
+                            port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
+                            path: `${targetUrl.pathname}${targetUrl.search}`,
+                            method: 'GET',
+                            headers: requestHeaders,
+                            socket: res.socket,
+                        }
+
+                        const request = protocol.request(requestOptions, handleResponse)
+                        request.on('error', handleError)
+                        request.end()
+                    }
+                )
+
+                req.on('error', handleError)
+                req.end()
+            } else {
+                // Direct connection (no proxy)
+                const targetUrl = new URL(url)
+                const protocol = targetUrl.protocol === 'https:' ? https : http
+                
+                const req = protocol.get(
+                    url,
+                    { headers: requestHeaders, timeout },
+                    handleResponse
+                )
+                req.on('error', handleError)
+                req.on('timeout', () => {
+                    req.destroy()
+                    reject(new Error('Request timeout'))
+                })
+            }
+        })
+    }
+
+    /**
+     * Fetch with retry logic
+     */
+    async fetchWithRetry(url, retries = 0) {
         try {
-            const response = await fetch(url, {
-                headers: {
-                    'User-Agent': this.config.userAgent,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Cache-Control': 'no-cache',
-                },
-                signal: controller.signal,
-                redirect: 'follow'
-            })
-
-            clearTimeout(timeoutId)
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-            }
-
-            const html = await response.text()
-            return { 
-                html, 
-                finalUrl: response.url,
-                statusCode: response.status 
-            }
+            return await this.fetchPage(url)
         } catch (error) {
-            clearTimeout(timeoutId)
-            
             if (retries < this.config.maxRequestRetries) {
                 if (this.config.debugLog) {
                     await cafesdk.log.debug(`Retrying ${url} (${retries + 2}/${this.config.maxRequestRetries + 1})`)
                 }
                 await this.delay(this.config.requestDelayMs * (retries + 1))
-                return this.fetchPage(url, retries + 1)
+                return this.fetchWithRetry(url, retries + 1)
             }
             throw error
         }
@@ -260,36 +366,29 @@ class HTMLScraper {
 
         const links = []
         const excludePatterns = this.parseExcludePatterns(this.config)
-        const currentDomain = getDomain(currentUrl)
 
         $(this.config.linkSelector).each((_, element) => {
             try {
                 const href = $(element).attr('href')
                 if (!href) return
 
-                // Skip anchors and javascript
                 if (href.startsWith('#') || href.startsWith('javascript:')) return
 
-                // Resolve relative URLs
                 const absoluteUrl = new URL(href, currentUrl).href
 
-                // Only follow HTTP(S) links
                 if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
                     return
                 }
 
-                // Check exclude patterns
                 if (shouldExclude(absoluteUrl, excludePatterns)) {
                     return
                 }
 
-                // Check domain
                 const targetDomain = getDomain(absoluteUrl)
                 if (!this.config.crossDomain && targetDomain !== this.startDomain) {
                     return
                 }
 
-                // Normalize and deduplicate
                 const normalizedUrl = normalizeUrl(absoluteUrl)
                 if (!this.visitedUrls.has(normalizedUrl)) {
                     links.push({ url: normalizedUrl, depth: currentDepth + 1 })
@@ -312,7 +411,6 @@ class HTMLScraper {
         }
 
         try {
-            // Check exclude patterns before fetching
             const excludePatterns = this.parseExcludePatterns(this.config)
             if (shouldExclude(url, excludePatterns)) {
                 if (this.config.debugLog) {
@@ -321,22 +419,17 @@ class HTMLScraper {
                 return null
             }
 
-            // Fetch page
-            const { html, finalUrl, statusCode } = await this.fetchPage(url)
+            const { html, finalUrl, statusCode } = await this.fetchWithRetry(url)
 
-            // Parse with Cheerio
             const $ = cheerio.load(html)
 
-            // Extract data
             const data = await this.extractData($, url)
             data.depth = depth
             data.statusCode = statusCode
             data.success = true
 
-            // Discover new links
             const newLinks = await this.discoverLinks($, url, depth)
 
-            // Add new links to queue
             for (const link of newLinks) {
                 this.queue.push(link)
             }
@@ -371,13 +464,11 @@ class HTMLScraper {
             throw new Error('No start URLs provided')
         }
 
-        // Initialize proxy for CafeScraper platform
+        // Initialize proxy
         await this.initProxy()
 
-        // Store starting domain for cross-domain check
         this.startDomain = getDomain(startUrls[0])
 
-        // Initialize queue
         for (const url of startUrls) {
             this.queue.push({ url, depth: 0 })
             this.visitedUrls.add(url)
@@ -387,7 +478,6 @@ class HTMLScraper {
         await cafesdk.log.info(`   URLs: ${startUrls.length} | Depth: ${this.config.maxCrawlingDepth} | Max Pages: ${this.config.maxPagesPerCrawl}`)
         await cafesdk.log.info(`   Domain: ${this.startDomain} | Cross-domain: ${this.config.crossDomain}`)
 
-        // Set table headers
         const headers = [
             { label: 'URL', key: 'url', format: 'text' },
             { label: 'Title', key: 'title', format: 'text' },
@@ -398,17 +488,14 @@ class HTMLScraper {
         ]
         await cafesdk.result.setTableHeader(headers)
 
-        // Process queue with concurrency control
         const processingPromises = new Set()
 
         while (this.queue.length > 0 || this.activeRequests > 0) {
-            // Check page limit
             if (this.config.maxPagesPerCrawl > 0 && this.pagesProcessed >= this.config.maxPagesPerCrawl) {
                 await cafesdk.log.info(`Reached max pages: ${this.config.maxPagesPerCrawl}`)
                 break
             }
 
-            // Start new requests if we have capacity
             while (this.queue.length > 0 && this.activeRequests < this.config.maxConcurrency) {
                 if (this.config.maxPagesPerCrawl > 0 && this.pagesProcessed >= this.config.maxPagesPerCrawl) {
                     break
@@ -416,7 +503,6 @@ class HTMLScraper {
 
                 const { url, depth } = this.queue.shift()
                 
-                // Check depth limit
                 if (depth > this.config.maxCrawlingDepth) {
                     continue
                 }
@@ -426,7 +512,6 @@ class HTMLScraper {
 
                 const promise = (async () => {
                     try {
-                        // Add delay between requests
                         if (this.config.requestDelayMs > 0 && this.pagesProcessed > 1) {
                             await this.delay(this.config.requestDelayMs)
                         }
@@ -450,16 +535,13 @@ class HTMLScraper {
                 processingPromises.add(promise)
             }
 
-            // Wait a bit before next iteration
             if (this.activeRequests >= this.config.maxConcurrency || this.queue.length === 0) {
                 await this.delay(50)
             }
         }
 
-        // Wait for all remaining requests
         await Promise.all(processingPromises)
 
-        // Summary
         await cafesdk.log.info(`✅ Complete! Total: ${this.pagesProcessed} | Success: ${this.successCount} | Failed: ${this.failCount}`)
     }
 }
@@ -471,17 +553,12 @@ async function main() {
     try {
         await cafesdk.log.info('HTML Scraper Worker started')
 
-        // Get input
         const input = await cafesdk.parameter.getInputJSONObject()
         await cafesdk.log.debug(`Input: ${JSON.stringify(input)}`)
 
-        // Create scraper instance
         const scraper = new HTMLScraper(input)
-
-        // Parse start URLs
         const startUrls = scraper.parseStartUrls(input)
 
-        // Run scraper
         await scraper.run(startUrls)
 
     } catch (error) {
