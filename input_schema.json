@@ -1,5 +1,5 @@
 {
-  "description": "Lightweight web scraper using HTTP requests and Cheerio. Fast HTML parsing without browser overhead. | 轻量级网页爬虫，使用 HTTP 请求和 Cheerio，无需浏览器，速度更快。",
+  "description": "Fast HTML web scraper without browser overhead. Ideal for static websites. | 快速 HTML 网页爬虫，无需浏览器，适合静态网站。",
   "b": "startUrls",
   "properties": [
     {
@@ -18,15 +18,23 @@
       "name": "linkSelector",
       "type": "string",
       "editor": "input",
-      "description": "CSS selector for finding links to crawl (e.g., 'a[href]'). Leave empty to disable link discovery. | 用于发现链接的 CSS 选择器，留空禁用链接发现",
+      "description": "CSS selector for finding links. Leave empty to disable. | 用于发现链接的 CSS 选择器，留空禁用",
       "default": "a[href]"
+    },
+    {
+      "title": "排除 URL 模式 | Exclude URL Patterns",
+      "name": "excludePatterns",
+      "type": "array",
+      "editor": "stringList",
+      "description": "URL patterns to skip (e.g., /login, /admin). | 要跳过的 URL 模式",
+      "default": []
     },
     {
       "title": "最大爬取深度 | Max Depth",
       "name": "maxCrawlingDepth",
       "type": "integer",
       "editor": "number",
-      "description": "Maximum crawl depth from start URLs (0 = start page only). | 最大爬取深度（0 = 仅起始页）",
+      "description": "Maximum crawl depth (0 = start page only). | 最大爬取深度（0 = 仅起始页）",
       "default": 1
     },
     {
@@ -38,59 +46,51 @@
       "default": 100
     },
     {
-      "title": "最大并发数 | Max Concurrency",
+      "title": "最大并发数 | Concurrency",
       "name": "maxConcurrency",
       "type": "integer",
       "editor": "number",
-      "description": "Maximum concurrent requests. | 最大并发请求数",
+      "description": "Concurrent requests. Higher = faster but more load. | 并发请求数，越高越快但负载越大",
       "default": 10
     },
     {
-      "title": "请求超时(秒) | Request Timeout (secs)",
+      "title": "请求超时(秒) | Timeout (secs)",
       "name": "requestTimeoutSecs",
       "type": "integer",
       "editor": "number",
-      "description": "HTTP request timeout in seconds. | HTTP 请求超时时间（秒）",
+      "description": "HTTP request timeout. | HTTP 请求超时时间",
       "default": 30
     },
     {
-      "title": "最大重试次数 | Max Retries",
+      "title": "重试次数 | Retries",
       "name": "maxRequestRetries",
       "type": "integer",
       "editor": "number",
-      "description": "Maximum retries for failed requests. | 失败请求的最大重试次数",
-      "default": 3
+      "description": "Retries for failed requests. | 失败请求重试次数",
+      "default": 2
     },
     {
-      "title": "忽略 SSL 错误 | Ignore SSL Errors",
-      "name": "ignoreSslErrors",
-      "type": "boolean",
-      "editor": "switch",
-      "description": "Ignore SSL certificate errors. | 忽略 SSL 证书错误",
-      "default": true
-    },
-    {
-      "title": "User-Agent",
-      "name": "userAgent",
-      "type": "string",
-      "editor": "input",
-      "description": "Custom User-Agent header. | 自定义 User-Agent",
-      "default": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    },
-    {
-      "title": "请求延迟(ms) | Request Delay (ms)",
+      "title": "请求延迟(ms) | Delay (ms)",
       "name": "requestDelayMs",
       "type": "integer",
       "editor": "number",
-      "description": "Delay between requests in milliseconds. | 请求之间的延迟（毫秒）",
+      "description": "Delay between requests. Prevents rate limiting. | 请求间隔，防止被限流",
       "default": 500
+    },
+    {
+      "title": "跨域爬取 | Cross-Domain",
+      "name": "crossDomain",
+      "type": "boolean",
+      "editor": "switch",
+      "description": "Allow crawling other domains. | 允许爬取其他域名",
+      "default": false
     },
     {
       "title": "调试日志 | Debug Log",
       "name": "debugLog",
       "type": "boolean",
       "editor": "switch",
-      "description": "Enable detailed debug logging. | 启用详细调试日志",
+      "description": "Enable detailed logging. | 启用详细日志",
       "default": false
     }
   ]

@@ -2,8 +2,7 @@
 'use strict'
 
 /**
- * Local test script for Cheerio Scraper Worker
- * Runs without CafeScraper platform (standalone mode)
+ * Local test script for HTML Scraper Worker
  */
 
 const cheerio = require('cheerio')
@@ -15,64 +14,56 @@ const TEST_CONFIG = {
         { url: 'https://www.iana.org/domains/reserved' }
     ],
     linkSelector: 'a[href]',
+    excludePatterns: [],
     maxCrawlingDepth: 2,
     maxPagesPerCrawl: 10,
-    maxConcurrency: 2,
+    maxConcurrency: 3,
     requestTimeoutSecs: 30,
     maxRequestRetries: 2,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    requestDelayMs: 500,
+    requestDelayMs: 300,
+    crossDomain: false,
     debugLog: true
 }
 
-// Results storage
+// Results
 const results = []
 
 // Logging
 const log = {
-    info: (...args) => console.log('[INFO]', ...args),
-    error: (...args) => console.error('[ERROR]', ...args),
-    warn: (...args) => console.warn('[WARN]', ...args),
-    debug: (...args) => TEST_CONFIG.debugLog && console.log('[DEBUG]', ...args)
+    info: (...args) => console.log('ℹ️', ...args),
+    error: (...args) => console.error('❌', ...args),
+    warn: (...args) => console.warn('⚠️', ...args),
+    debug: (...args) => TEST_CONFIG.debugLog && console.log('🔍', ...args)
 }
 
-/**
- * URL normalization
- */
+// Utility functions
 function normalizeUrl(url) {
     try {
         const parsed = new URL(url)
         let path = parsed.pathname
-        if (path.endsWith('/') && path.length > 1) {
-            path = path.slice(0, -1)
-        }
+        if (path.endsWith('/') && path.length > 1) path = path.slice(0, -1)
         return `${parsed.protocol}//${parsed.host}${path}${parsed.search}`
     } catch {
         return url.replace(/\/$/, '')
     }
 }
 
-/**
- * Check same domain
- */
-function isSameDomain(url1, url2) {
-    try {
-        return new URL(url1).hostname === new URL(url2).hostname
-    } catch {
-        return false
-    }
+function shouldExclude(url, patterns) {
+    if (!patterns?.length) return false
+    const urlLower = url.toLowerCase()
+    return patterns.some(p => urlLower.includes(p.toLowerCase()))
 }
 
-/**
- * Delay helper
- */
+function getDomain(url) {
+    try { return new URL(url).hostname } catch { return '' }
+}
+
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-/**
- * Fetch page with timeout and retries
- */
+// Fetch with retry
 async function fetchPage(url, timeoutSecs = 30, retries = 2) {
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeoutSecs * 1000)
@@ -82,18 +73,13 @@ async function fetchPage(url, timeoutSecs = 30, retries = 2) {
             const response = await fetch(url, {
                 headers: {
                     'User-Agent': TEST_CONFIG.userAgent,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept': 'text/html,application/xhtml+xml',
                 },
                 signal: controller.signal
             })
 
             clearTimeout(timeoutId)
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`)
-            }
-
+            if (!response.ok) throw new Error(`HTTP ${response.status}`)
             return await response.text()
         } catch (error) {
             if (attempt === retries) {
@@ -101,128 +87,71 @@ async function fetchPage(url, timeoutSecs = 30, retries = 2) {
                 throw error
             }
             log.debug(`Retry ${attempt + 1}/${retries} for ${url}`)
-            await delay(1000)
+            await delay(500)
         }
     }
 }
 
-/**
- * Extract data from HTML
- */
+// Extract data
 function extractData($, url) {
     return {
-        url: url,
+        url,
         title: $('title').text().trim() || '',
         description: $('meta[name="description"]').attr('content') || '',
-        keywords: $('meta[name="keywords"]').attr('content') || '',
         h1: $('h1').first().text().trim() || '',
         h2List: $('h2').slice(0, 5).map((_, el) => $(el).text().trim()).get().filter(Boolean),
         textLength: $('body').text().replace(/\s+/g, ' ').trim().length,
         imageCount: $('img').length,
         linkCount: $('a[href]').length,
-        metaRobots: $('meta[name="robots"]').attr('content') || '',
-        ogTitle: $('meta[property="og:title"]').attr('content') || '',
     }
 }
 
-/**
- * Discover links
- */
-function discoverLinks($, currentUrl, visitedUrls, maxLinks = 20) {
+// Discover links
+function discoverLinks($, currentUrl, visitedUrls, startDomain) {
     const links = []
-    const currentHost = new URL(currentUrl).hostname
-    
-    $('a[href]').each((_, element) => {
-        if (links.length >= maxLinks) return false
-        
+    const currentDomain = getDomain(currentUrl)
+
+    $('a[href]').each((_, el) => {
         try {
-            const href = $(element).attr('href')
+            const href = $(el).attr('href')
             if (!href || href.startsWith('#') || href.startsWith('javascript:')) return
 
             const absoluteUrl = new URL(href, currentUrl).href
+            if (!absoluteUrl.startsWith('http')) return
 
-            if (!absoluteUrl.startsWith('http://') && !absoluteUrl.startsWith('https://')) {
-                return
-            }
-
-            const targetHost = new URL(absoluteUrl).hostname
-            if (targetHost !== currentHost) {
-                return
-            }
+            const targetDomain = getDomain(absoluteUrl)
+            if (!TEST_CONFIG.crossDomain && targetDomain !== startDomain) return
 
             const normalizedUrl = normalizeUrl(absoluteUrl)
-            if (!visitedUrls.has(normalizedUrl)) {
+            if (!visitedUrls.has(normalizedUrl) && !shouldExclude(normalizedUrl, TEST_CONFIG.excludePatterns)) {
                 links.push(normalizedUrl)
                 visitedUrls.add(normalizedUrl)
             }
-        } catch (e) {
-            // Skip invalid URLs
-        }
+        } catch (e) {}
     })
 
     return links
 }
 
-/**
- * Process a single page
- */
-async function processPage(url, depth, visitedUrls, queue) {
-    log.info(`Processing: ${url} (depth: ${depth})`)
-
-    try {
-        const html = await fetchPage(url)
-        const $ = cheerio.load(html)
-
-        // Extract data
-        const data = extractData($, url)
-        data.depth = depth
-        data.success = true
-        data.linksFound = 0
-
-        // Discover links if depth allows
-        if (depth < TEST_CONFIG.maxCrawlingDepth && TEST_CONFIG.linkSelector) {
-            const newLinks = discoverLinks($, url, visitedUrls)
-            for (const link of newLinks) {
-                queue.push({ url: link, depth: depth + 1 })
-            }
-            data.linksFound = newLinks.length
-            if (newLinks.length > 0) {
-                log.debug(`Found ${newLinks.length} new links`)
-            }
-        }
-
-        return data
-
-    } catch (error) {
-        log.error(`Failed: ${url} - ${error.message}`)
-        return {
-            url: url,
-            depth: depth,
-            success: false,
-            error: error.message
-        }
-    }
-}
-
-/**
- * Main test function
- */
+// Main test
 async function runTest() {
     console.log('\n' + '='.repeat(60))
-    console.log('Cheerio Scraper Worker - Local Test')
+    console.log('⚡ HTML Scraper Worker - Local Test')
     console.log('='.repeat(60))
-    console.log('\nConfiguration:')
-    console.log(`  Start URLs: ${TEST_CONFIG.startUrls.map(u => u.url).join(', ')}`)
-    console.log(`  Max Depth: ${TEST_CONFIG.maxCrawlingDepth}`)
-    console.log(`  Max Pages: ${TEST_CONFIG.maxPagesPerCrawl}`)
-    console.log(`  Concurrency: ${TEST_CONFIG.maxConcurrency}`)
-    console.log(`  Request Delay: ${TEST_CONFIG.requestDelayMs}ms`)
+    console.log('\n📋 Configuration:')
+    console.log(`   URLs: ${TEST_CONFIG.startUrls.length}`)
+    console.log(`   Max Depth: ${TEST_CONFIG.maxCrawlingDepth}`)
+    console.log(`   Max Pages: ${TEST_CONFIG.maxPagesPerCrawl}`)
+    console.log(`   Concurrency: ${TEST_CONFIG.maxConcurrency}`)
     console.log('')
 
     const visitedUrls = new Set()
     const queue = []
     let pagesProcessed = 0
-    const startTime = Date.now()
+    let successCount = 0
+    let failCount = 0
+
+    const startDomain = getDomain(TEST_CONFIG.startUrls[0].url)
 
     // Initialize queue
     for (const item of TEST_CONFIG.startUrls) {
@@ -231,72 +160,58 @@ async function runTest() {
         visitedUrls.add(url)
     }
 
-    // Process queue
+    const startTime = Date.now()
+
+    // Process
     while (queue.length > 0 && pagesProcessed < TEST_CONFIG.maxPagesPerCrawl) {
         const { url, depth } = queue.shift()
+        if (depth > TEST_CONFIG.maxCrawlingDepth) continue
 
-        if (depth > TEST_CONFIG.maxCrawlingDepth) {
-            continue
-        }
-
-        // Add delay between requests
         if (TEST_CONFIG.requestDelayMs > 0 && pagesProcessed > 0) {
             await delay(TEST_CONFIG.requestDelayMs)
         }
 
-        const result = await processPage(url, depth, visitedUrls, queue)
-        results.push(result)
-        pagesProcessed++
+        log.info(`[${depth}] ${url}`)
 
-        // Print result summary
-        const status = result.success ? '✓' : '✗'
-        console.log(`  ${status} [${result.depth}] ${result.url}`)
-        if (result.success) {
-            console.log(`      Title: ${result.title.substring(0, 50)}${result.title.length > 50 ? '...' : ''}`)
-            console.log(`      Links found: ${result.linksFound}`)
+        try {
+            const html = await fetchPage(url)
+            const $ = cheerio.load(html)
+            const data = extractData($, url)
+            data.depth = depth
+            data.success = true
+            data.linksFound = 0
+
+            if (depth < TEST_CONFIG.maxCrawlingDepth) {
+                const newLinks = discoverLinks($, url, visitedUrls, startDomain)
+                for (const link of newLinks) queue.push({ url: link, depth: depth + 1 })
+                data.linksFound = newLinks.length
+            }
+
+            results.push(data)
+            successCount++
+            console.log(`   ✅ Title: "${data.title.substring(0, 40)}${data.title.length > 40 ? '...' : ''}"`)
+            console.log(`      Links: ${data.linksFound} | Text: ${data.textLength} chars`)
+
+        } catch (error) {
+            log.error(`${url}: ${error.message}`)
+            results.push({ url, depth, success: false, error: error.message })
+            failCount++
         }
+
+        pagesProcessed++
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2)
 
     // Summary
     console.log('\n' + '='.repeat(60))
-    console.log('Test Complete!')
+    console.log('✅ Test Complete!')
     console.log('='.repeat(60))
-    console.log(`\nDuration: ${duration}s`)
-    console.log(`Total pages: ${pagesProcessed}`)
-    console.log(`Successful: ${results.filter(r => r.success).length}`)
-    console.log(`Failed: ${results.filter(r => !r.success).length}`)
-    
-    // Performance metrics
-    const avgTime = (duration / pagesProcessed).toFixed(2)
-    console.log(`Avg time per page: ${avgTime}s`)
-    
-    // Show failed URLs
-    const failed = results.filter(r => !r.success)
-    if (failed.length > 0) {
-        console.log('\nFailed URLs:')
-        failed.forEach(r => console.log(`  - ${r.url}: ${r.error}`))
-    }
-
-    console.log('\n' + '-'.repeat(60))
-    console.log('Detailed Results:')
-    console.log('-'.repeat(60))
-    results.forEach((r, i) => {
-        console.log(`\n[${i + 1}] ${r.url}`)
-        if (r.success) {
-            console.log(`    Title: ${r.title}`)
-            console.log(`    H1: ${r.h1}`)
-            console.log(`    Text Length: ${r.textLength}`)
-            console.log(`    Images: ${r.imageCount}, Links: ${r.linkCount}`)
-        } else {
-            console.log(`    Error: ${r.error}`)
-        }
-    })
+    console.log(`\n⏱️  Duration: ${duration}s`)
+    console.log(`📄 Total pages: ${pagesProcessed}`)
+    console.log(`✅ Success: ${successCount}`)
+    console.log(`❌ Failed: ${failCount}`)
+    console.log(`⚡ Speed: ${(pagesProcessed / parseFloat(duration)).toFixed(2)} pages/sec`)
 }
 
-// Run test
-runTest().catch(error => {
-    console.error('Test failed:', error)
-    process.exit(1)
-})
+runTest().catch(console.error)

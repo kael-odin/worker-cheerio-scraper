@@ -5,17 +5,18 @@ const cafesdk = require('./sdk')
 const cheerio = require('cheerio')
 
 /**
- * Cheerio Scraper Worker
+ * HTML Scraper Worker (formerly Cheerio Scraper)
  * 
- * A lightweight web scraper using HTTP requests and Cheerio for HTML parsing.
- * Much faster than browser-based scrapers as it doesn't render JavaScript.
+ * A fast, lightweight web scraper using HTTP requests and Cheerio.
+ * No browser needed - 10-50x faster than browser-based scrapers!
  * 
  * Features:
- * - HTTP-based crawling (no browser needed)
- * - Cheerio for fast HTML parsing
+ * - HTTP-based crawling (no browser overhead)
+ * - Fast HTML parsing with Cheerio
  * - Link discovery and depth control
- * - Concurrent request handling
- * - Custom data extraction
+ * - URL exclusion patterns
+ * - Cross-domain option
+ * - Concurrent requests with rate limiting
  */
 
 // Default configuration
@@ -24,11 +25,12 @@ const DEFAULT_CONFIG = {
     maxPagesPerCrawl: 100,
     maxConcurrency: 10,
     requestTimeoutSecs: 30,
-    maxRequestRetries: 3,
-    ignoreSslErrors: true,
+    maxRequestRetries: 2,
     linkSelector: 'a[href]',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    excludePatterns: [],
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     requestDelayMs: 500,
+    crossDomain: false,
     debugLog: false
 }
 
@@ -38,21 +40,36 @@ const DEFAULT_CONFIG = {
 function normalizeUrl(url) {
     try {
         const parsed = new URL(url)
-        // Remove trailing slash from path
         let path = parsed.pathname
         if (path.endsWith('/') && path.length > 1) {
             path = path.slice(0, -1)
         }
-        // Remove default port
         const port = parsed.port
         const defaultPorts = { 'http:': '80', 'https:': '443' }
         const host = port && defaultPorts[parsed.protocol] === port
             ? parsed.hostname
             : parsed.host
-        return `${parsed.protocol}//${host}${path}${parsed.search}${parsed.hash}`
+        return `${parsed.protocol}//${host}${path}${parsed.search}`
     } catch {
         return url.replace(/\/$/, '')
     }
+}
+
+/**
+ * Check if URL matches any exclude pattern
+ */
+function shouldExclude(url, patterns) {
+    if (!patterns || patterns.length === 0) return false
+    const urlLower = url.toLowerCase()
+    return patterns.some(pattern => {
+        const p = pattern.toLowerCase()
+        // Support both glob-like and substring matching
+        if (p.includes('*')) {
+            const regex = new RegExp(p.replace(/\*/g, '.*'), 'i')
+            return regex.test(url)
+        }
+        return urlLower.includes(p)
+    })
 }
 
 /**
@@ -60,22 +77,33 @@ function normalizeUrl(url) {
  */
 function isSameDomain(url1, url2) {
     try {
-        const u1 = new URL(url1)
-        const u2 = new URL(url2)
-        return u1.hostname === u2.hostname
+        return new URL(url1).hostname === new URL(url2).hostname
     } catch {
         return false
     }
 }
 
-class CheerioScraper {
+/**
+ * Extract domain from URL
+ */
+function getDomain(url) {
+    try {
+        return new URL(url).hostname
+    } catch {
+        return ''
+    }
+}
+
+class HTMLScraper {
     constructor(config) {
         this.config = { ...DEFAULT_CONFIG, ...config }
         this.visitedUrls = new Set()
         this.queue = []
         this.pagesProcessed = 0
-        this.results = []
+        this.successCount = 0
+        this.failCount = 0
         this.activeRequests = 0
+        this.startDomain = ''
     }
 
     /**
@@ -98,6 +126,19 @@ class CheerioScraper {
     }
 
     /**
+     * Parse exclude patterns
+     */
+    parseExcludePatterns(input) {
+        if (!input.excludePatterns) return []
+        if (Array.isArray(input.excludePatterns)) {
+            return input.excludePatterns
+                .map(p => typeof p === 'string' ? p.trim() : (p.string || ''))
+                .filter(Boolean)
+        }
+        return []
+    }
+
+    /**
      * Fetch a page with retries
      */
     async fetchPage(url, retries = 0) {
@@ -113,9 +154,11 @@ class CheerioScraper {
                     'User-Agent': this.config.userAgent,
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Cache-Control': 'no-cache',
                 },
                 signal: controller.signal,
-                // Node.js 18+ fetch doesn't have ignoreSSL option, handle differently
+                redirect: 'follow'
             })
 
             clearTimeout(timeoutId)
@@ -125,15 +168,19 @@ class CheerioScraper {
             }
 
             const html = await response.text()
-            return { html, headers: Object.fromEntries(response.headers), url: response.url }
+            return { 
+                html, 
+                finalUrl: response.url,
+                statusCode: response.status 
+            }
         } catch (error) {
             clearTimeout(timeoutId)
             
             if (retries < this.config.maxRequestRetries) {
                 if (this.config.debugLog) {
-                    await cafesdk.log.debug(`Retrying ${url} (attempt ${retries + 2}/${this.config.maxRequestRetries + 1})`)
+                    await cafesdk.log.debug(`Retrying ${url} (${retries + 2}/${this.config.maxRequestRetries + 1})`)
                 }
-                await this.delay(this.config.requestDelayMs * 2)
+                await this.delay(this.config.requestDelayMs * (retries + 1))
                 return this.fetchPage(url, retries + 1)
             }
             throw error
@@ -141,25 +188,26 @@ class CheerioScraper {
     }
 
     /**
-     * Extract data from HTML using Cheerio
+     * Extract data from HTML
      */
     async extractData($, url) {
-        const data = {
+        return {
             url: url,
             title: $('title').text().trim() || '',
             description: $('meta[name="description"]').attr('content') || '',
             keywords: $('meta[name="keywords"]').attr('content') || '',
             h1: $('h1').first().text().trim() || '',
             h2List: $('h2').slice(0, 5).map((_, el) => $(el).text().trim()).get().filter(Boolean),
-            textLength: $('body').text().length,
+            textLength: $('body').text().replace(/\s+/g, ' ').trim().length,
             imageCount: $('img').length,
             linkCount: $('a[href]').length,
             metaRobots: $('meta[name="robots"]').attr('content') || '',
             canonicalUrl: $('link[rel="canonical"]').attr('href') || '',
             ogTitle: $('meta[property="og:title"]').attr('content') || '',
             ogDescription: $('meta[property="og:description"]').attr('content') || '',
+            ogImage: $('meta[property="og:image"]').attr('content') || '',
+            language: $('html').attr('lang') || '',
         }
-        return data
     }
 
     /**
@@ -171,10 +219,16 @@ class CheerioScraper {
         }
 
         const links = []
+        const excludePatterns = this.parseExcludePatterns(this.config)
+        const currentDomain = getDomain(currentUrl)
+
         $(this.config.linkSelector).each((_, element) => {
             try {
                 const href = $(element).attr('href')
                 if (!href) return
+
+                // Skip anchors and javascript
+                if (href.startsWith('#') || href.startsWith('javascript:')) return
 
                 // Resolve relative URLs
                 const absoluteUrl = new URL(href, currentUrl).href
@@ -184,8 +238,14 @@ class CheerioScraper {
                     return
                 }
 
-                // Check same domain (optional, can be configured)
-                if (!isSameDomain(absoluteUrl, currentUrl)) {
+                // Check exclude patterns
+                if (shouldExclude(absoluteUrl, excludePatterns)) {
+                    return
+                }
+
+                // Check domain
+                const targetDomain = getDomain(absoluteUrl)
+                if (!this.config.crossDomain && targetDomain !== this.startDomain) {
                     return
                 }
 
@@ -212,8 +272,17 @@ class CheerioScraper {
         }
 
         try {
+            // Check exclude patterns before fetching
+            const excludePatterns = this.parseExcludePatterns(this.config)
+            if (shouldExclude(url, excludePatterns)) {
+                if (this.config.debugLog) {
+                    await cafesdk.log.debug(`Skipping excluded URL: ${url}`)
+                }
+                return null
+            }
+
             // Fetch page
-            const { html, headers } = await this.fetchPage(url)
+            const { html, finalUrl, statusCode } = await this.fetchPage(url)
 
             // Parse with Cheerio
             const $ = cheerio.load(html)
@@ -221,7 +290,7 @@ class CheerioScraper {
             // Extract data
             const data = await this.extractData($, url)
             data.depth = depth
-            data.statusCode = 200
+            data.statusCode = statusCode
             data.success = true
 
             // Discover new links
@@ -237,7 +306,7 @@ class CheerioScraper {
             return data
 
         } catch (error) {
-            await cafesdk.log.error(`Failed to process ${url}: ${error.message}`)
+            await cafesdk.log.error(`Failed: ${url} - ${error.message}`)
             return {
                 url: url,
                 depth: depth,
@@ -262,14 +331,18 @@ class CheerioScraper {
             throw new Error('No start URLs provided')
         }
 
+        // Store starting domain for cross-domain check
+        this.startDomain = getDomain(startUrls[0])
+
         // Initialize queue
         for (const url of startUrls) {
             this.queue.push({ url, depth: 0 })
             this.visitedUrls.add(url)
         }
 
-        await cafesdk.log.info(`Starting Cheerio Scraper with ${startUrls.length} start URLs`)
-        await cafesdk.log.info(`Config: maxDepth=${this.config.maxCrawlingDepth}, maxPages=${this.config.maxPagesPerCrawl}, concurrency=${this.config.maxConcurrency}`)
+        await cafesdk.log.info(`🚀 Starting HTML Scraper`)
+        await cafesdk.log.info(`   URLs: ${startUrls.length} | Depth: ${this.config.maxCrawlingDepth} | Max Pages: ${this.config.maxPagesPerCrawl}`)
+        await cafesdk.log.info(`   Domain: ${this.startDomain} | Cross-domain: ${this.config.crossDomain}`)
 
         // Set table headers
         const headers = [
@@ -277,18 +350,18 @@ class CheerioScraper {
             { label: 'Title', key: 'title', format: 'text' },
             { label: 'Description', key: 'description', format: 'text' },
             { label: 'Depth', key: 'depth', format: 'text' },
-            { label: 'Status', key: 'success', format: 'text' },
-            { label: 'Links Found', key: 'linksFound', format: 'text' }
+            { label: 'Status', key: 'statusCode', format: 'text' },
+            { label: 'Links', key: 'linksFound', format: 'text' }
         ]
         await cafesdk.result.setTableHeader(headers)
 
         // Process queue with concurrency control
-        const processingPromises = []
+        const processingPromises = new Set()
 
         while (this.queue.length > 0 || this.activeRequests > 0) {
             // Check page limit
             if (this.config.maxPagesPerCrawl > 0 && this.pagesProcessed >= this.config.maxPagesPerCrawl) {
-                await cafesdk.log.info(`Reached max pages limit: ${this.config.maxPagesPerCrawl}`)
+                await cafesdk.log.info(`Reached max pages: ${this.config.maxPagesPerCrawl}`)
                 break
             }
 
@@ -311,35 +384,40 @@ class CheerioScraper {
                 const promise = (async () => {
                     try {
                         // Add delay between requests
-                        if (this.config.requestDelayMs > 0) {
+                        if (this.config.requestDelayMs > 0 && this.pagesProcessed > 1) {
                             await this.delay(this.config.requestDelayMs)
                         }
 
                         const result = await this.processPage(url, depth)
                         
-                        if (result.success) {
+                        if (result) {
                             await cafesdk.result.pushData(result)
-                        } else {
-                            await cafesdk.result.pushData(result)
+                            if (result.success) {
+                                this.successCount++
+                            } else {
+                                this.failCount++
+                            }
                         }
                     } finally {
                         this.activeRequests--
+                        processingPromises.delete(promise)
                     }
                 })()
 
-                processingPromises.push(promise)
+                processingPromises.add(promise)
             }
 
             // Wait a bit before next iteration
-            if (this.activeRequests >= this.config.maxConcurrency) {
-                await this.delay(100)
+            if (this.activeRequests >= this.config.maxConcurrency || this.queue.length === 0) {
+                await this.delay(50)
             }
         }
 
-        // Wait for all remaining requests to complete
+        // Wait for all remaining requests
         await Promise.all(processingPromises)
 
-        await cafesdk.log.info(`Scraping complete. Total pages processed: ${this.pagesProcessed}`)
+        // Summary
+        await cafesdk.log.info(`✅ Complete! Total: ${this.pagesProcessed} | Success: ${this.successCount} | Failed: ${this.failCount}`)
     }
 }
 
@@ -348,22 +426,20 @@ class CheerioScraper {
  */
 async function main() {
     try {
-        await cafesdk.log.info('Cheerio Scraper Worker started')
+        await cafesdk.log.info('HTML Scraper Worker started')
 
         // Get input
         const input = await cafesdk.parameter.getInputJSONObject()
         await cafesdk.log.debug(`Input: ${JSON.stringify(input)}`)
 
         // Create scraper instance
-        const scraper = new CheerioScraper(input)
+        const scraper = new HTMLScraper(input)
 
         // Parse start URLs
         const startUrls = scraper.parseStartUrls(input)
 
         // Run scraper
         await scraper.run(startUrls)
-
-        await cafesdk.log.info('Cheerio Scraper Worker finished successfully')
 
     } catch (error) {
         await cafesdk.log.error(`Script error: ${error.message}`)
