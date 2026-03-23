@@ -1,10 +1,6 @@
 #!/usr/bin/env node
 'use strict'
 
-/**
- * Local test script for HTML Scraper Worker
- */
-
 const cheerio = require('cheerio')
 
 // Test configuration
@@ -37,7 +33,6 @@ const log = {
     debug: (...args) => TEST_CONFIG.debugLog && console.log('🔍', ...args)
 }
 
-// Utility functions
 function normalizeUrl(url) {
     try {
         const parsed = new URL(url)
@@ -110,6 +105,7 @@ function extractData($, url) {
 function discoverLinks($, currentUrl, visitedUrls, startDomain) {
     const links = []
     const currentDomain = getDomain(currentUrl)
+    let foundCount = 0
 
     $('a[href]').each((_, el) => {
         try {
@@ -120,16 +116,22 @@ function discoverLinks($, currentUrl, visitedUrls, startDomain) {
             if (!absoluteUrl.startsWith('http')) return
 
             const targetDomain = getDomain(absoluteUrl)
-            if (!TEST_CONFIG.crossDomain && targetDomain !== startDomain) return
+            
+            // Check cross-domain
+            if (!TEST_CONFIG.crossDomain && targetDomain !== startDomain) {
+                return
+            }
 
             const normalizedUrl = normalizeUrl(absoluteUrl)
             if (!visitedUrls.has(normalizedUrl) && !shouldExclude(normalizedUrl, TEST_CONFIG.excludePatterns)) {
-                links.push(normalizedUrl)
+                links.push({ url: normalizedUrl, depth: 0 })
                 visitedUrls.add(normalizedUrl)
+                foundCount++
             }
         } catch (e) {}
     })
 
+    log.debug(`Found ${foundCount} new links on ${currentUrl}`)
     return links
 }
 
@@ -152,6 +154,7 @@ async function runTest() {
     let failCount = 0
 
     const startDomain = getDomain(TEST_CONFIG.startUrls[0].url)
+    console.log(`📍 Start domain: ${startDomain}\n`)
 
     // Initialize queue
     for (const item of TEST_CONFIG.startUrls) {
@@ -167,7 +170,8 @@ async function runTest() {
         const { url, depth } = queue.shift()
         if (depth > TEST_CONFIG.maxCrawlingDepth) continue
 
-        if (TEST_CONFIG.requestDelayMs > 0 && pagesProcessed > 0) {
+        // Delay between requests
+        if (pagesProcessed > 0 && TEST_CONFIG.requestDelayMs > 0) {
             await delay(TEST_CONFIG.requestDelayMs)
         }
 
@@ -179,13 +183,14 @@ async function runTest() {
             const data = extractData($, url)
             data.depth = depth
             data.success = true
-            data.linksFound = 0
 
-            if (depth < TEST_CONFIG.maxCrawlingDepth) {
-                const newLinks = discoverLinks($, url, visitedUrls, startDomain)
-                for (const link of newLinks) queue.push({ url: link, depth: depth + 1 })
-                data.linksFound = newLinks.length
+            // Discover links
+            const newLinks = discoverLinks($, url, visitedUrls, startDomain)
+            for (const link of newLinks) {
+                link.depth = depth + 1
+                queue.push(link)
             }
+            data.linksFound = newLinks.length
 
             results.push(data)
             successCount++
@@ -207,11 +212,11 @@ async function runTest() {
     console.log('\n' + '='.repeat(60))
     console.log('✅ Test Complete!')
     console.log('='.repeat(60))
-    console.log(`\n⏱️  Duration: ${duration}s`)
-    console.log(`📄 Total pages: ${pagesProcessed}`)
-    console.log(`✅ Success: ${successCount}`)
-    console.log(`❌ Failed: ${failCount}`)
-    console.log(`⚡ Speed: ${(pagesProcessed / parseFloat(duration)).toFixed(2)} pages/sec`)
+    console.log(`\n📊 Results:`)
+    console.log(`   Total: ${pagesProcessed} pages`)
+    console.log(`   Successful: ${successCount} ✓`)
+    console.log(`   Failed: ${failCount} ✗`)
+    console.log(`   Time: ${duration}s (${(duration / pagesProcessed).toFixed(2)}s/page)`)
 }
 
 runTest().catch(console.error)
