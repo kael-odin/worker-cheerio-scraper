@@ -1,0 +1,20 @@
+{
+  "name": "worker-cheerio-scraper",
+  "version": "1.0.0",
+  "description": "Lightweight web scraper using HTTP and Cheerio for CafeScraper",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.13.4",
+    "cheerio": "^1.0.0",
+    "google-protobuf": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Kael Odin",
+  "license": "Apache-2.0"
+}

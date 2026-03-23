@@ -1,0 +1,97 @@
+{
+  "description": "Lightweight web scraper using HTTP requests and Cheerio. Fast HTML parsing without browser overhead. | 轻量级网页爬虫，使用 HTTP 请求和 Cheerio，无需浏览器，速度更快。",
+  "b": "startUrls",
+  "properties": [
+    {
+      "title": "起始 URL | Start URLs",
+      "name": "startUrls",
+      "type": "array",
+      "editor": "requestList",
+      "description": "URLs to start crawling from | 开始爬取的 URL 列表",
+      "default": [
+        { "url": "https://example.com" }
+      ],
+      "required": true
+    },
+    {
+      "title": "链接选择器 | Link Selector",
+      "name": "linkSelector",
+      "type": "string",
+      "editor": "input",
+      "description": "CSS selector for finding links to crawl (e.g., 'a[href]'). Leave empty to disable link discovery. | 用于发现链接的 CSS 选择器，留空禁用链接发现",
+      "default": "a[href]"
+    },
+    {
+      "title": "最大爬取深度 | Max Depth",
+      "name": "maxCrawlingDepth",
+      "type": "integer",
+      "editor": "number",
+      "description": "Maximum crawl depth from start URLs (0 = start page only). | 最大爬取深度（0 = 仅起始页）",
+      "default": 1
+    },
+    {
+      "title": "最大页面数 | Max Pages",
+      "name": "maxPagesPerCrawl",
+      "type": "integer",
+      "editor": "number",
+      "description": "Maximum pages to crawl (0 = unlimited). | 最大爬取页面数（0 = 不限制）",
+      "default": 100
+    },
+    {
+      "title": "最大并发数 | Max Concurrency",
+      "name": "maxConcurrency",
+      "type": "integer",
+      "editor": "number",
+      "description": "Maximum concurrent requests. | 最大并发请求数",
+      "default": 10
+    },
+    {
+      "title": "请求超时(秒) | Request Timeout (secs)",
+      "name": "requestTimeoutSecs",
+      "type": "integer",
+      "editor": "number",
+      "description": "HTTP request timeout in seconds. | HTTP 请求超时时间（秒）",
+      "default": 30
+    },
+    {
+      "title": "最大重试次数 | Max Retries",
+      "name": "maxRequestRetries",
+      "type": "integer",
+      "editor": "number",
+      "description": "Maximum retries for failed requests. | 失败请求的最大重试次数",
+      "default": 3
+    },
+    {
+      "title": "忽略 SSL 错误 | Ignore SSL Errors",
+      "name": "ignoreSslErrors",
+      "type": "boolean",
+      "editor": "switch",
+      "description": "Ignore SSL certificate errors. | 忽略 SSL 证书错误",
+      "default": true
+    },
+    {
+      "title": "User-Agent",
+      "name": "userAgent",
+      "type": "string",
+      "editor": "input",
+      "description": "Custom User-Agent header. | 自定义 User-Agent",
+      "default": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    },
+    {
+      "title": "请求延迟(ms) | Request Delay (ms)",
+      "name": "requestDelayMs",
+      "type": "integer",
+      "editor": "number",
+      "description": "Delay between requests in milliseconds. | 请求之间的延迟（毫秒）",
+      "default": 500
+    },
+    {
+      "title": "调试日志 | Debug Log",
+      "name": "debugLog",
+      "type": "boolean",
+      "editor": "switch",
+      "description": "Enable detailed debug logging. | 启用详细调试日志",
+      "default": false
+    }
+  ]
+}
