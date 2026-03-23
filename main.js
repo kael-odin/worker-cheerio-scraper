@@ -123,7 +123,23 @@ function getDomain(url) {
 
 class CheerioScraper {
     constructor(config) {
-        this.config = { ...DEFAULT_CONFIG, ...config }
+        // Normalize config - handle stringList format (array) for linkSelector
+        const normalizedConfig = { ...config }
+        
+        // Handle linkSelector from stringList (array format)
+        if (Array.isArray(config.linkSelector)) {
+            // stringList returns [{string: "value"}] or ["value"]
+            const first = config.linkSelector[0]
+            if (first && typeof first === 'object' && first.string) {
+                normalizedConfig.linkSelector = first.string
+            } else if (typeof first === 'string') {
+                normalizedConfig.linkSelector = first
+            } else {
+                normalizedConfig.linkSelector = DEFAULT_CONFIG.linkSelector
+            }
+        }
+        
+        this.config = { ...DEFAULT_CONFIG, ...normalizedConfig }
         this.browser = null
         this.visitedUrls = new Set()
         this.queue = []
