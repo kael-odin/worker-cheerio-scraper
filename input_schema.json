@@ -18,8 +18,10 @@
       "name": "linkSelector",
       "type": "array",
       "editor": "stringList",
-      "description": "CSS selector for finding links (e.g., a[href]). Use single item. | 用于发现链接的 CSS 选择器（如 a[href]），只需填写一项",
-      "default": ["a[href]"]
+      "description": "CSS selector for finding links (e.g., a[href]). Only first item is used. | 用于发现链接的 CSS 选择器（如 a[href]），只使用第一个",
+      "default": [
+        { "string": "a[href]" }
+      ]
     },
     {
       "title": "Glob 模式 | Glob Patterns",
