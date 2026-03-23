@@ -16,12 +16,10 @@
     {
       "title": "链接选择器 | Link Selector",
       "name": "linkSelector",
-      "type": "array",
-      "editor": "stringList",
-      "description": "CSS selector for finding links (e.g., a[href]). Only first item is used. | 用于发现链接的 CSS 选择器（如 a[href]），只使用第一个",
-      "default": [
-        { "string": "a[href]" }
-      ]
+      "type": "string",
+      "editor": "textfield",
+      "description": "CSS selector for finding links (e.g., a[href]). | 用于发现链接的 CSS 选择器（如 a[href]）",
+      "default": "a[href]"
     },
     {
       "title": "Glob 模式 | Glob Patterns",

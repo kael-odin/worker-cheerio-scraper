@@ -123,10 +123,10 @@ function getDomain(url) {
 
 class CheerioScraper {
     constructor(config) {
-        // Normalize config - handle stringList format (array) for linkSelector
+        // Normalize config - handle various formats for linkSelector
         const normalizedConfig = { ...config }
         
-        // Handle linkSelector from stringList (array format)
+        // Handle linkSelector: can be string (textfield) or array (stringList legacy)
         if (Array.isArray(config.linkSelector)) {
             // stringList returns [{string: "value"}] or ["value"]
             const first = config.linkSelector[0]
@@ -137,6 +137,9 @@ class CheerioScraper {
             } else {
                 normalizedConfig.linkSelector = DEFAULT_CONFIG.linkSelector
             }
+        } else if (typeof config.linkSelector === 'string' && config.linkSelector.trim()) {
+            // textfield returns string directly
+            normalizedConfig.linkSelector = config.linkSelector.trim()
         }
         
         this.config = { ...DEFAULT_CONFIG, ...normalizedConfig }
