@@ -27,10 +27,10 @@ const DEFAULT_CONFIG = {
     pseudoUrls: [],
     excludePatterns: [],
     maxCrawlingDepth: 1,
-    maxPagesPerCrawl: 100,
-    maxConcurrency: 10,
-    pageLoadTimeoutSecs: 60,
-    maxRequestRetries: 3,
+    maxPagesPerCrawl: 50,
+    maxConcurrency: 3,
+    pageLoadTimeoutSecs: 20,
+    maxRequestRetries: 1,
     keepUrlFragments: false,
     ignoreSslErrors: true,
     debugLog: false,
@@ -38,7 +38,7 @@ const DEFAULT_CONFIG = {
     pageFunction: `
         async function pageFunction(context) {
             const { $, request, response } = context;
-            
+
             return {
                 url: request.url,
                 title: $('title').text().trim(),
@@ -150,6 +150,9 @@ class CheerioScraper {
         this.successCount = 0
         this.failCount = 0
         this.results = []
+        this.failedDomains = new Set()
+        this.domainFailCount = {}
+        this.startTime = Date.now()
         
         // Parse and compile page function
         this.pageFunction = this._compilePageFunction(config.pageFunction)
@@ -243,22 +246,38 @@ class CheerioScraper {
 
     async createPage() {
         const page = await this.browser.newPage()
-        
+
         // Block unnecessary resources for speed
         await page.setRequestInterception(true)
-        
+
         page.on('request', (request) => {
             const resourceType = request.resourceType()
+            const url = request.url()
+
             // Block images, styles, fonts, media
-            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+            if (['image', 'stylesheet', 'font', 'media', 'manifest'].includes(resourceType)) {
                 request.abort()
                 return
             }
+
+            // Block known tracking/analytics scripts
+            const blockedPatterns = [
+                'google-analytics.com', 'googletagmanager.com', 'analytics.',
+                'facebook.net', 'hotjar.com', 'fullstory.com',
+                'sentry.io', 'newrelic.com', 'datadog',
+                'intercom.io', 'crisp.chat', 'tawk.to',
+                'doubleclick.net', 'googlesyndication.com',
+            ]
+            if (blockedPatterns.some(p => url.includes(p))) {
+                request.abort()
+                return
+            }
+
             request.continue()
         })
-        
+
         page.setDefaultTimeout(this.config.pageLoadTimeoutSecs * 1000)
-        
+
         return page
     }
 
@@ -345,7 +364,7 @@ class CheerioScraper {
         if (this.config.debugLog) {
             await cafesdk.log.debug(`Processing: ${url} (depth: ${depth})`)
         }
-        
+
         try {
             // Check exclude patterns
             if (shouldExclude(url, this.config.excludePatterns)) {
@@ -354,12 +373,34 @@ class CheerioScraper {
                 }
                 return null
             }
-            
+
+            // Skip URLs from domains that have failed too many times
+            const domain = getDomain(url)
+            if (this.failedDomains.has(domain)) {
+                if (this.config.debugLog) {
+                    await cafesdk.log.debug(`Skipping known-bad domain: ${domain}`)
+                }
+                return {
+                    url,
+                    depth,
+                    error: `Domain skipped: ${domain} had too many failures`,
+                    statusCode: null
+                }
+            }
+
             // Fetch page with timeout handling
             let fetchResult
             try {
                 fetchResult = await this.fetchPage(url, page)
+                // Reset domain fail count on success
+                this.domainFailCount[domain] = 0
             } catch (fetchError) {
+                // Track domain failures
+                this.domainFailCount[domain] = (this.domainFailCount[domain] || 0) + 1
+                if (this.domainFailCount[domain] >= 3) {
+                    this.failedDomains.add(domain)
+                    await cafesdk.log.warn(`Domain ${domain} marked as bad after ${this.domainFailCount[domain]} failures`)
+                }
                 // If fetch fails, try to recover the page
                 if (this.config.debugLog) {
                     await cafesdk.log.debug(`Fetch failed for ${url}: ${fetchError.message}`)
@@ -439,8 +480,13 @@ class CheerioScraper {
             this.visitedUrls.add(normalizedUrl)
         }
         
-        await cafesdk.log.info(`🚀 Starting Cheerio Scraper`)
+        // Overall timeout: 8 minutes max
+        const overallTimeoutMs = 8 * 60 * 1000
+        this.startTime = Date.now()
+        
+        await cafesdk.log.info(`Starting Cheerio Scraper`)
         await cafesdk.log.info(`   URLs: ${startUrls.length} | Depth: ${this.config.maxCrawlingDepth} | Max Pages: ${this.config.maxPagesPerCrawl}`)
+        await cafesdk.log.info(`   Timeout: ${this.config.pageLoadTimeoutSecs}s | Concurrency: ${this.config.maxConcurrency} | Retries: ${this.config.maxRequestRetries}`)
         
         // Set table headers
         const headers = [
@@ -453,16 +499,18 @@ class CheerioScraper {
         ]
         await cafesdk.result.setTableHeader(headers)
         
-        // Create page pool
+        // Create page pool - limit to maxConcurrency
         const pagePool = []
         const maxPages = Math.min(this.config.maxConcurrency, 5)
         
+        const self = this
+        
         async function createNewPage() {
-            return await this.createPage()
+            return await self.createPage()
         }
         
         for (let i = 0; i < maxPages; i++) {
-            const page = await createNewPage.call(this)
+            const page = await createNewPage()
             pagePool.push({ page, busy: false })
         }
         
@@ -473,7 +521,7 @@ class CheerioScraper {
                     available.busy = true
                     return available
                 }
-                await this.delay(100)
+                await self.delay(50)
             }
         }
         
@@ -485,17 +533,23 @@ class CheerioScraper {
                     await pageHolder.page.close()
                 } catch (e) {}
                 try {
-                    pageHolder.page = await createNewPage.call(this)
+                    pageHolder.page = await createNewPage()
                 } catch (e) {
                     await cafesdk.log.warn(`Failed to recreate page: ${e.message}`)
                 }
             }
         }
         
-        // Process queue
+        // Process queue with overall timeout check
         const processingPromises = new Set()
         
         while (this.queue.length > 0 || processingPromises.size > 0) {
+            // Check overall timeout
+            if (Date.now() - this.startTime > overallTimeoutMs) {
+                await cafesdk.log.warn(`Overall timeout reached (${overallTimeoutMs / 1000}s), stopping`)
+                break
+            }
+            
             // Check page limit
             if (this.config.maxPagesPerCrawl > 0 && this.pagesProcessed >= this.config.maxPagesPerCrawl) {
                 await cafesdk.log.info(`Reached max pages: ${this.config.maxPagesPerCrawl}`)
@@ -508,10 +562,29 @@ class CheerioScraper {
                     break
                 }
                 
+                // Check overall timeout
+                if (Date.now() - this.startTime > overallTimeoutMs) {
+                    break
+                }
+                
                 const { url, depth } = this.queue.shift()
                 
                 // Check depth limit
                 if (depth > this.config.maxCrawlingDepth) {
+                    continue
+                }
+                
+                // Skip URLs from failed domains early
+                const domain = getDomain(url)
+                if (this.failedDomains.has(domain)) {
+                    this.pagesProcessed++
+                    this.failCount++
+                    await cafesdk.result.pushData({
+                        url,
+                        depth,
+                        error: `Domain skipped: ${domain}`,
+                        statusCode: null
+                    })
                     continue
                 }
                 
@@ -523,24 +596,24 @@ class CheerioScraper {
                     let lastError = null
                     
                     while (retries <= this.config.maxRequestRetries) {
-                        const pageHolder = await getAvailablePage.call(this)
+                        const pageHolder = await getAvailablePage()
                         
                         try {
-                            result = await this.processPage(url, depth, pageHolder.page)
-                            await releasePage.call(this, pageHolder, false)
+                            result = await self.processPage(url, depth, pageHolder.page)
+                            await releasePage(pageHolder, false)
                             break
                         } catch (err) {
                             lastError = err
                             const isTimeout = err.message && err.message.includes('timeout')
                             // Recreate page on error (especially timeout)
-                            await releasePage.call(this, pageHolder, true)
+                            await releasePage(pageHolder, true)
                             retries++
                             
-                            if (retries <= this.config.maxRequestRetries) {
-                                if (this.config.debugLog) {
-                                    await cafesdk.log.debug(`Retry ${retries}/${this.config.maxRequestRetries} for ${url}${isTimeout ? ' (timeout)' : ''}`)
+                            if (retries <= self.config.maxRequestRetries) {
+                                if (self.config.debugLog) {
+                                    await cafesdk.log.debug(`Retry ${retries}/${self.config.maxRequestRetries} for ${url}${isTimeout ? ' (timeout)' : ''}`)
                                 }
-                                await this.delay(1000 * retries)
+                                await self.delay(500 * retries)
                             } else {
                                 result = {
                                     url,
@@ -555,9 +628,9 @@ class CheerioScraper {
                     if (result) {
                         await cafesdk.result.pushData(result)
                         if (result.error) {
-                            this.failCount++
+                            self.failCount++
                         } else {
-                            this.successCount++
+                            self.successCount++
                         }
                     }
                     
@@ -565,11 +638,16 @@ class CheerioScraper {
                 })()
                 
                 processingPromises.add(promise)
+                
+                // Stagger CDP connections by 100ms to avoid connection storms
+                if (processingPromises.size < self.config.maxConcurrency) {
+                    await self.delay(100)
+                }
             }
             
             // Wait a bit
             if (processingPromises.size >= this.config.maxConcurrency || this.queue.length === 0) {
-                await this.delay(100)
+                await this.delay(50)
             }
         }
         
@@ -584,8 +662,13 @@ class CheerioScraper {
         // Close browser
         await this.close()
         
+        const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1)
+        
         // Summary
-        await cafesdk.log.info(`✅ Complete! Total: ${this.pagesProcessed} | Success: ${this.successCount} | Failed: ${this.failCount}`)
+        await cafesdk.log.info(`Complete! Total: ${this.pagesProcessed} | Success: ${this.successCount} | Failed: ${this.failCount} | Time: ${elapsed}s`)
+        if (this.failedDomains.size > 0) {
+            await cafesdk.log.info(`Skipped domains: ${[...this.failedDomains].join(', ')}`)
+        }
     }
 }
 

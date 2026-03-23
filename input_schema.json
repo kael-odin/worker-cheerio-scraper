@@ -55,32 +55,32 @@
       "name": "maxPagesPerCrawl",
       "type": "integer",
       "editor": "number",
-      "description": "Maximum pages to crawl (0 = unlimited). | 最大爬取页面数（0 = 不限制）",
-      "default": 100
+      "description": "Maximum pages to crawl (0 = unlimited, recommend 50 for speed). | 最大爬取页面数（0 = 不限制，建议 50）",
+      "default": 50
     },
     {
       "title": "最大并发数 | Concurrency",
       "name": "maxConcurrency",
       "type": "integer",
       "editor": "number",
-      "description": "Maximum concurrent requests. | 最大并发请求数",
-      "default": 10
+      "description": "Maximum concurrent requests (recommend 3-5 for CDP browser). | 最大并发请求数（CDP 浏览器建议 3-5）",
+      "default": 3
     },
     {
       "title": "页面超时(秒) | Page Timeout (secs)",
       "name": "pageLoadTimeoutSecs",
       "type": "integer",
       "editor": "number",
-      "description": "Page load timeout in seconds. | 页面加载超时时间（秒）",
-      "default": 60
+      "description": "Page load timeout in seconds (lower = faster failures). | 页面加载超时时间（秒，越低失败越快）",
+      "default": 20
     },
     {
       "title": "重试次数 | Retries",
       "name": "maxRequestRetries",
       "type": "integer",
       "editor": "number",
-      "description": "Maximum retries for failed requests. | 失败请求重试次数",
-      "default": 3
+      "description": "Maximum retries for failed requests (0 = no retry). | 失败请求重试次数（0 = 不重试）",
+      "default": 1
     },
     {
       "title": "保留 URL Fragment | Keep URL Fragments",
