@@ -17,7 +17,7 @@
       "title": "链接选择器 | Link Selector",
       "name": "linkSelector",
       "type": "string",
-      "editor": "textfield",
+      "editor": "textarea",
       "description": "CSS selector for finding links (e.g., a[href]). Leave empty to disable link discovery. | 用于发现链接的 CSS 选择器（如 a[href]），留空禁用链接发现",
       "default": "a[href]"
     },
