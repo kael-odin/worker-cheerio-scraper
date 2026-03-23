@@ -3,6 +3,7 @@
 
 const cafesdk = require('./sdk')
 const cheerio = require('cheerio')
+const { ProxyAgent, setGlobalDispatcher } = require('undici')
 
 /**
  * HTML Scraper Worker (formerly Cheerio Scraper)
@@ -104,6 +105,27 @@ class HTMLScraper {
         this.failCount = 0
         this.activeRequests = 0
         this.startDomain = ''
+        this.proxyEnabled = false
+    }
+
+    /**
+     * Initialize proxy for CafeScraper platform
+     */
+    async initProxy() {
+        const proxyAuth = process.env.PROXY_AUTH
+        if (proxyAuth) {
+            const proxyDomain = 'proxy-inner.cafescraper.com:6000'
+            const proxyUrl = `socks5://${proxyAuth}@${proxyDomain}`
+            
+            try {
+                const agent = new ProxyAgent(proxyUrl)
+                setGlobalDispatcher(agent)
+                this.proxyEnabled = true
+                await cafesdk.log.info('Proxy enabled for external access')
+            } catch (err) {
+                await cafesdk.log.warn(`Proxy setup failed: ${err.message}`)
+            }
+        }
     }
 
     /**
@@ -348,6 +370,9 @@ class HTMLScraper {
         if (!startUrls || startUrls.length === 0) {
             throw new Error('No start URLs provided')
         }
+
+        // Initialize proxy for CafeScraper platform
+        await this.initProxy()
 
         // Store starting domain for cross-domain check
         this.startDomain = getDomain(startUrls[0])
