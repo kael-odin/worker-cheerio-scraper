@@ -185,6 +185,17 @@ class CheerioScraper {
             browserWSEndpoint = process.env.CDP_ENDPOINT
         } else if (process.env.BROWSER_WS_ENDPOINT) {
             browserWSEndpoint = process.env.BROWSER_WS_ENDPOINT
+        } else if (process.env.LOCAL_DEV === '1') {
+            // Local development mode: launch local browser
+            await cafesdk.log.info('LOCAL_DEV mode: launching local browser')
+            this.browser = await puppeteer.launch({
+                headless: true,
+                ignoreHTTPSErrors: this.config.ignoreSslErrors,
+                args: ['--disable-gpu', '--no-sandbox', '--disable-setuid-sandbox']
+            })
+            this.isLocalBrowser = true
+            await cafesdk.log.info('Local browser launched')
+            return
         } else {
             throw new Error('No browser endpoint configured. PROXY_AUTH should be set by CafeScraper platform.')
         }
@@ -200,7 +211,11 @@ class CheerioScraper {
 
     async close() {
         if (this.browser) {
-            this.browser.disconnect()
+            if (this.isLocalBrowser) {
+                await this.browser.close()
+            } else {
+                this.browser.disconnect()
+            }
         }
     }
 
