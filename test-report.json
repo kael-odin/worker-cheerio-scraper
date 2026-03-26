@@ -1,0 +1,205 @@
+{
+  "timestamp": "2026-03-26T03:46:37.284Z",
+  "total": 49,
+  "passed": 49,
+  "failed": 0,
+  "successRate": "100.0%",
+  "results": [
+    {
+      "name": "Normalize URL - Basic",
+      "status": "PASS"
+    },
+    {
+      "name": "Normalize URL - With path",
+      "status": "PASS"
+    },
+    {
+      "name": "Normalize URL - With query",
+      "status": "PASS"
+    },
+    {
+      "name": "Normalize URL - Remove fragment by default",
+      "status": "PASS"
+    },
+    {
+      "name": "Normalize URL - Keep fragment when specified",
+      "status": "PASS"
+    },
+    {
+      "name": "Normalize URL - Root path keeps slash",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse startUrls - Object format",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse startUrls - String format",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse startUrls - Mixed formats",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse url field (Cafe format)",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse url field - String",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse - Empty array",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse - Null elements",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse - Empty strings filtered",
+      "status": "PASS"
+    },
+    {
+      "name": "Glob - Wildcard match",
+      "status": "PASS"
+    },
+    {
+      "name": "Glob - No match",
+      "status": "PASS"
+    },
+    {
+      "name": "Glob - Multiple wildcards",
+      "status": "PASS"
+    },
+    {
+      "name": "Glob - Single character",
+      "status": "PASS"
+    },
+    {
+      "name": "Glob - Exact match",
+      "status": "PASS"
+    },
+    {
+      "name": "Exclude - String pattern",
+      "status": "PASS"
+    },
+    {
+      "name": "Exclude - Not matching",
+      "status": "PASS"
+    },
+    {
+      "name": "Exclude - Glob pattern",
+      "status": "PASS"
+    },
+    {
+      "name": "Exclude - Object glob format",
+      "status": "PASS"
+    },
+    {
+      "name": "Exclude - Empty patterns",
+      "status": "PASS"
+    },
+    {
+      "name": "Exclude - Null patterns",
+      "status": "PASS"
+    },
+    {
+      "name": "Get domain - Basic",
+      "status": "PASS"
+    },
+    {
+      "name": "Get domain - Subdomain",
+      "status": "PASS"
+    },
+    {
+      "name": "Get domain - Invalid URL",
+      "status": "PASS"
+    },
+    {
+      "name": "Link selector - Default",
+      "status": "PASS"
+    },
+    {
+      "name": "Link selector - String",
+      "status": "PASS"
+    },
+    {
+      "name": "Link selector - StringList format",
+      "status": "PASS"
+    },
+    {
+      "name": "Link selector - Array string",
+      "status": "PASS"
+    },
+    {
+      "name": "Link selector - Empty string uses default",
+      "status": "PASS"
+    },
+    {
+      "name": "input_schema exists",
+      "status": "PASS"
+    },
+    {
+      "name": "input_schema has b field for array",
+      "status": "PASS"
+    },
+    {
+      "name": "input_schema startUrls is array type",
+      "status": "PASS"
+    },
+    {
+      "name": "input_schema has valid editor types",
+      "status": "PASS"
+    },
+    {
+      "name": "input_schema has required fields",
+      "status": "PASS"
+    },
+    {
+      "name": "input_schema required fields marked",
+      "status": "PASS"
+    },
+    {
+      "name": "Config - Default values",
+      "status": "PASS"
+    },
+    {
+      "name": "Config - linkSelector stringList to string",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse - Invalid URL object returns empty",
+      "status": "PASS"
+    },
+    {
+      "name": "Parse - Empty input returns empty",
+      "status": "PASS"
+    },
+    {
+      "name": "Glob - Invalid regex patterns handled",
+      "status": "PASS"
+    },
+    {
+      "name": "PseudoUrl - Invalid regex handled",
+      "status": "PASS"
+    },
+    {
+      "name": "Cafe format - url array with objects",
+      "status": "PASS"
+    },
+    {
+      "name": "Cafe format - url array with strings",
+      "status": "PASS"
+    },
+    {
+      "name": "Cafe format - Single url object",
+      "status": "PASS"
+    },
+    {
+      "name": "Cafe format - Mixed startUrls and url",
+      "status": "PASS"
+    }
+  ]
+}

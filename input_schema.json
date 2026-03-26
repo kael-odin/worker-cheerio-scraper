@@ -17,14 +17,9 @@
       "title": "链接选择器 | Link Selector",
       "name": "linkSelector",
       "type": "string",
-      "editor": "select",
-      "description": "CSS selector for finding links. | 用于发现链接的 CSS 选择器",
-      "default": "a[href]",
-      "options": [
-        { "label": "All Links (a[href])", "value": "a[href]" },
-        { "label": "Images (img)", "value": "img" },
-        { "label": "Custom...", "value": "" }
-      ]
+      "editor": "input",
+      "description": "CSS selector for finding links (default: a[href]). | 用于发现链接的 CSS 选择器（默认：a[href]）",
+      "default": "a[href]"
     },
     {
       "title": "Glob 模式 | Glob Patterns",

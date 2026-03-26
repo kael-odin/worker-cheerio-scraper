@@ -15,9 +15,40 @@
  * - Request headers customization
  */
 
-const cafesdk = require('./sdk')
 const cheerio = require('cheerio')
 const puppeteer = require('puppeteer')
+
+/**
+ * Auto-detect runtime environment and load correct SDK
+ * Priority:
+ * 1. global.cafesdk already set (test script override)
+ * 2. LOCAL_DEV=1 → local SDK
+ * 3. Default → cloud SDK (fallback to local on failure)
+ */
+function getSDK() {
+    // Test script override
+    if (global.cafesdk) return global.cafesdk;
+    
+    // Local development mode
+    if (process.env.LOCAL_DEV === '1') {
+        return require('./sdk_local');
+    }
+    
+    // Cafe cloud environment
+    try {
+        return require('./sdk');
+    } catch (err) {
+        console.log('[WARN] Failed to load gRPC SDK, falling back to local SDK');
+        return require('./sdk_local');
+    }
+}
+
+// Proxy for lazy SDK loading
+const cafesdk = new Proxy({}, {
+    get: function(target, prop) {
+        return getSDK()[prop];
+    }
+});
 
 // Default configuration
 const DEFAULT_CONFIG = {
