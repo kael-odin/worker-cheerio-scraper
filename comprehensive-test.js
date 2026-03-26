@@ -407,7 +407,7 @@ async function runTests() {
     
     await test('input_schema has valid editor types', async () => {
         const schema = JSON.parse(fs.readFileSync(path.join(__dirname, 'input_schema.json'), 'utf-8'));
-        const validEditors = ['requestList', 'requestListSource', 'stringList', 'input', 'textarea', 'number', 'select', 'switch', 'json', 'hidden', 'checkbox'];
+        const validEditors = ['requestList', 'requestListSource', 'stringList', 'input', 'textarea', 'number', 'select', 'radio', 'checkbox', 'switch', 'datepicker', 'json', 'hidden'];
         
         for (const prop of schema.properties) {
             if (prop.editor) {
